@@ -2,7 +2,8 @@ import {
   CATALOG, RARITY_WEIGHTS, REGEN_AMOUNT,
   SHIELD_ON_SPAWN, SPLASH_DIVISOR, STARTER_DECK,
   PACK_PRICE, REWARD_WIN, REWARD_FLAWLESS,
-  MIN_DECK_SIZE, MAX_DECK_SIZE, MAX_FIELD_SIZE,
+  MIN_DECK_SIZE, MAX_DECK_SIZE,
+  FIELD_COLS, FIELD_SLOTS,
 } from './cards';
 import { RNG } from './rng';
 import type { AbilityId, BattleEvent, CardId, CardInstance, MenuTab, Phase, Screen, Side } from './types';
@@ -10,7 +11,7 @@ import type { AbilityId, BattleEvent, CardId, CardInstance, MenuTab, Phase, Scre
 export type InventorySort = 'default' | 'name' | 'attack' | 'health' | 'rarity';
 export type InventoryFilter = 'all' | 'common' | 'rare' | 'epic';
 
-export const SAVE_VERSION = 7;
+export const SAVE_VERSION = 10;
 
 export interface Deck {
   id: string;
@@ -44,6 +45,24 @@ export interface GameState {
 
 let idCounter = 0;
 
+// ---------- ГЕОМЕТРИЯ ПОЛЯ ----------
+
+export function slotRow(slot: number): number {
+  return Math.floor(slot / FIELD_COLS);
+}
+
+export function slotCol(slot: number): number {
+  return slot % FIELD_COLS;
+}
+
+export function frontOf(slot: number): number {
+  return slotCol(slot);
+}
+
+export function backOf(slot: number): number {
+  return FIELD_COLS + slotCol(slot);
+}
+
 // ---------- ХЕЛПЕРЫ ----------
 
 export function defHasAbility(defId: CardId, ability: AbilityId): boolean {
@@ -52,6 +71,10 @@ export function defHasAbility(defId: CardId, ability: AbilityId): boolean {
 
 export function hasAbility(card: CardInstance, ability: AbilityId): boolean {
   return defHasAbility(card.defId, ability);
+}
+
+export function isRanged(card: CardInstance): boolean {
+  return CATALOG[card.defId].attackType === 'ranged';
 }
 
 export function getActiveDeck(state: GameState): Deck {
@@ -66,6 +89,18 @@ export function isInActiveDeck(state: GameState, instanceId: string): boolean {
   return getDeckIds(state).includes(instanceId);
 }
 
+export function fieldCards(side: Side): CardInstance[] {
+  return side.field.filter((c): c is CardInstance => c !== null);
+}
+
+export function aliveCount(side: Side): number {
+  return side.field.filter(c => c !== null && c.currentHp > 0).length;
+}
+
+export function emptySlots(side: Side): number {
+  return side.field.filter(c => c === null).length;
+}
+
 function instantiate(defId: CardId): CardInstance {
   const def = CATALOG[defId];
   return {
@@ -77,8 +112,12 @@ function instantiate(defId: CardId): CardInstance {
   };
 }
 
+function emptyField(): (CardInstance | null)[] {
+  return new Array(FIELD_SLOTS).fill(null);
+}
+
 function emptySide(): Side {
-  return { deck: [], hand: [], field: [], lost: [] };
+  return { hand: [], field: emptyField(), lost: [] };
 }
 
 function shuffle<T>(arr: T[], rng: RNG): T[] {
@@ -92,13 +131,6 @@ function shuffle<T>(arr: T[], rng: RNG): T[] {
 
 function newDeckId(): string {
   return `deck-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-}
-
-// Всё, что было в колоде, перекладываем в руку
-function drawAllToHand(state: GameState): void {
-  const s = state.player;
-  s.hand.push(...s.deck);
-  s.deck = [];
 }
 
 // ---------- ИНИЦИАЛИЗАЦИЯ ----------
@@ -115,7 +147,7 @@ export function createInitialState(seed?: number): GameState {
     rng: new RNG(seed),
     turn: 1,
     phase: 'placing',
-    player: { ...emptySide(), deck: [...deck] },
+    player: emptySide(),
     enemy: emptySide(),
     packs: 1,
     crystals: 0,
@@ -131,28 +163,50 @@ export function createInitialState(seed?: number): GameState {
     inventorySort: 'default',
     inventoryFilter: 'all',
   };
-  rebuildDeck(state);
-  drawAllToHand(state);
+  refillHand(state);
   spawnEnemyWave(state);
   return state;
 }
 
-function rebuildDeck(state: GameState): void {
+export function refillHand(state: GameState): void {
   const ids = new Set(getDeckIds(state));
-  const cards = state.collection.filter(c => ids.has(c.instanceId));
-  state.player.deck = shuffle(cards, state.rng);
+  const onField = new Set(
+    state.player.field.filter((c): c is CardInstance => c !== null).map(c => c.instanceId)
+  );
+  const inHand = new Set(state.player.hand.map(c => c.instanceId));
+
+  const missing = state.collection.filter(
+    c => ids.has(c.instanceId) && !onField.has(c.instanceId) && !inHand.has(c.instanceId)
+  );
+  state.player.hand.push(...shuffle(missing, state.rng));
 }
 
 function spawnEnemyWave(state: GameState): void {
-  const pool: CardId[] = ['goblin', 'slime', 'archer', 'knight'];
-  if (state.turn > 4) pool.push('mage', 'vampire');
-  if (state.turn > 6) pool.push('berserker');
-  if (state.turn > 8) pool.push('dragon');
+  const melee: CardId[]  = ['goblin', 'slime', 'knight'];
+  const ranged: CardId[] = ['archer'];
+  if (state.turn > 4) { melee.push('vampire'); ranged.push('mage'); }
+  if (state.turn > 6) { melee.push('berserker'); }
+  if (state.turn > 8) { ranged.push('dragon'); }
 
-  const count = Math.min(MAX_FIELD_SIZE, 1 + Math.floor(state.turn / 2));
-  state.enemy.field = [];
-  for (let i = 0; i < count; i++) {
-    state.enemy.field.push(instantiate(state.rng.pick(pool)));
+  const frontSlots = [0, 1, 2, 3];
+  const backSlots  = [4, 5, 6, 7];
+
+  const maxNew = Math.min(6, 1 + Math.floor(state.turn / 2));
+  let spawned = 0;
+
+  for (const s of backSlots) {
+    if (spawned >= maxNew) break;
+    if (!state.enemy.field[s]) {
+      state.enemy.field[s] = instantiate(state.rng.pick(ranged));
+      spawned++;
+    }
+  }
+  for (const s of frontSlots) {
+    if (spawned >= maxNew) break;
+    if (!state.enemy.field[s]) {
+      state.enemy.field[s] = instantiate(state.rng.pick(melee));
+      spawned++;
+    }
   }
 }
 
@@ -177,7 +231,7 @@ export function deleteDeck(state: GameState, deckId: string): boolean {
   if (state.activeDeckId === deckId) {
     state.activeDeckId = state.decks[0].id;
   }
-  refreshPlayerDeckIfSafe(state);
+  syncPlayerHandWithDeck(state);
   return true;
 }
 
@@ -193,7 +247,7 @@ export function renameDeck(state: GameState, deckId: string, name: string): bool
 export function setActiveDeck(state: GameState, deckId: string): boolean {
   if (!state.decks.some(d => d.id === deckId)) return false;
   state.activeDeckId = deckId;
-  refreshPlayerDeckIfSafe(state);
+  syncPlayerHandWithDeck(state);
   return true;
 }
 
@@ -203,7 +257,7 @@ export function isDeckReady(state: GameState): boolean {
 
 export function toggleCardInDeck(state: GameState, instanceId: string): boolean {
   const safe = state.screen === 'menu' ||
-    (state.phase === 'placing' && state.player.field.length === 0);
+    (state.phase === 'placing' && aliveCount(state.player) === 0);
   if (!safe) return false;
 
   const inCollection = state.collection.some(c => c.instanceId === instanceId);
@@ -220,41 +274,59 @@ export function toggleCardInDeck(state: GameState, instanceId: string): boolean 
     deck.cardIds.push(instanceId);
   }
 
-  refreshPlayerDeckIfSafe(state);
+  syncPlayerHandWithDeck(state);
   return true;
 }
 
-function refreshPlayerDeckIfSafe(state: GameState): void {
+function syncPlayerHandWithDeck(state: GameState): void {
   const safe = state.screen === 'menu' ||
-    (state.phase === 'placing' && state.player.field.length === 0);
+    (state.phase === 'placing' && aliveCount(state.player) === 0);
   if (!safe) return;
 
   state.player.hand = [];
-  state.player.field = [];
-  rebuildDeck(state);
-  drawAllToHand(state);
+  refillHand(state);
 }
 
-// ---------- ДЕЙСТВИЯ В БОЮ ----------
+// ---------- ДЕЙСТВИЯ НА ПОЛЕ ----------
 
-export function placeCard(state: GameState, instanceId: string): boolean {
+export function placeCardInSlot(state: GameState, instanceId: string, slot: number): boolean {
   if (state.phase !== 'placing') return false;
-  if (state.player.field.length >= MAX_FIELD_SIZE) return false;
+  if (slot < 0 || slot >= FIELD_SLOTS) return false;
+  if (state.player.field[slot]) return false;
+
   const idx = state.player.hand.findIndex(c => c.instanceId === instanceId);
   if (idx === -1) return false;
+
   const [card] = state.player.hand.splice(idx, 1);
-  state.player.field.push(card);
+  state.player.field[slot] = card;
   return true;
 }
 
-// ---------- СОРТИРОВКА / ФИЛЬТР ----------
+export function swapSlots(state: GameState, a: number, b: number): boolean {
+  if (state.phase !== 'placing') return false;
+  if (a === b) return false;
+  if (a < 0 || a >= FIELD_SLOTS) return false;
+  if (b < 0 || b >= FIELD_SLOTS) return false;
 
-export function setInventorySort(state: GameState, sort: InventorySort): void {
-  state.inventorySort = sort;
+  const ca = state.player.field[a];
+  const cb = state.player.field[b];
+  if (!ca && !cb) return false;
+
+  state.player.field[a] = cb;
+  state.player.field[b] = ca;
+  return true;
 }
 
-export function setInventoryFilter(state: GameState, filter: InventoryFilter): void {
-  state.inventoryFilter = filter;
+export function returnCardToHand(state: GameState, slot: number): boolean {
+  if (state.phase !== 'placing') return false;
+  if (slot < 0 || slot >= FIELD_SLOTS) return false;
+
+  const card = state.player.field[slot];
+  if (!card) return false;
+
+  state.player.field[slot] = null;
+  state.player.hand.push(card);
+  return true;
 }
 
 // ---------- НАВИГАЦИЯ ----------
@@ -266,6 +338,25 @@ export function goToMenu(state: GameState): void {
 
 export function goToBattle(state: GameState): void {
   if (!isDeckReady(state)) return;
+
+  // Предыдущее сражение окончено? Начинаем новую сессию.
+  const needsReset =
+    state.phase === 'pack' ||
+    state.phase === 'spoils' ||
+    (aliveCount(state.player) === 0 && state.player.hand.length === 0);
+
+  if (needsReset) {
+    state.turn = 1;
+    state.player.field = emptyField();
+    state.player.hand = [];
+    state.enemy.field = emptyField();
+    state.spoils = [];
+    state.log = ['Начало нового сражения.'];
+    state.phase = 'placing';
+    refillHand(state);
+    spawnEnemyWave(state);
+  }
+
   state.screen = 'battle';
   state.showInventory = false;
 }
@@ -278,10 +369,23 @@ export function toggleInventory(state: GameState): void {
   state.showInventory = !state.showInventory;
 }
 
+export function setInventorySort(state: GameState, sort: InventorySort): void {
+  state.inventorySort = sort;
+}
+
+export function setInventoryFilter(state: GameState, filter: InventoryFilter): void {
+  state.inventoryFilter = filter;
+}
+
 // ---------- БОЙ ----------
 
 export function resolveBattle(state: GameState): void {
-  if (state.phase !== 'placing' || state.player.field.length === 0) return;
+  if (state.phase !== 'placing') return;
+
+  const anyPlayer = aliveCount(state.player) > 0;
+  const anyEnemy  = aliveCount(state.enemy) > 0;
+  if (!anyPlayer || !anyEnemy) return;
+
   state.phase = 'battle';
   state.log = [];
   state.battleEvents = [];
@@ -295,16 +399,27 @@ export function resolveBattle(state: GameState): void {
   playerDead.push(...cleanupField(state.player, state.log, true, state.battleEvents));
   enemyDead.push(...cleanupField(state.enemy,  state.log, false, state.battleEvents));
 
-  const p = state.player.field;
-  const e = state.enemy.field;
-  const pairs = Math.max(p.length, e.length);
+  const attacks: { attacker: CardInstance; defender: CardInstance; slot: number }[] = [];
 
-  for (let i = 0; i < pairs; i++) {
-    const pc = p[i];
-    const ec = e[i];
-    if (pc && pc.currentHp > 0 && ec && ec.currentHp > 0) {
-      fightPair(pc, ec, i, state);
+  for (let s = 0; s < FIELD_SLOTS; s++) {
+    const pc = state.player.field[s];
+    if (pc && pc.currentHp > 0) {
+      const target = pickTarget(state.enemy.field, s, isRanged(pc));
+      if (target) attacks.push({ attacker: pc, defender: target, slot: s });
     }
+  }
+  for (let s = 0; s < FIELD_SLOTS; s++) {
+    const ec = state.enemy.field[s];
+    if (ec && ec.currentHp > 0) {
+      const target = pickTarget(state.player.field, s, isRanged(ec));
+      if (target) attacks.push({ attacker: ec, defender: target, slot: s });
+    }
+  }
+
+  for (const atk of attacks) {
+    if (atk.attacker.currentHp <= 0) continue;
+    if (atk.defender.currentHp <= 0) continue;
+    fightPair(atk.attacker, atk.defender, atk.slot, state);
   }
 
   playerDead.push(...cleanupField(state.player, state.log, true, state.battleEvents));
@@ -318,22 +433,19 @@ export function resolveBattle(state: GameState): void {
     }
   }
 
-  // Трофеи копятся всё сражение
   if (enemyDead.length > 0) {
     state.spoils.push(...enemyDead.map(c => instantiate(c.defId)));
   }
 
   awardCrystals(state, playerDead);
-
   state.turn++;
 
-  const totalDeck =
-    state.player.deck.length + state.player.hand.length + state.player.field.length;
+  const playerHasCards =
+    aliveCount(state.player) > 0 || state.player.hand.length > 0;
 
-  if (totalDeck === 0) {
+  if (!playerHasCards) {
     state.packs++;
     state.log.push('🎁 Сражение окончено. Все карты потеряны — доступен пак!');
-
     if (state.spoils.length > 0) {
       state.phase = 'spoils';
       state.log.push(`🏆 Трофеи за сражение: ${state.spoils.length}. Выберите одну!`);
@@ -343,26 +455,37 @@ export function resolveBattle(state: GameState): void {
     return;
   }
 
-  startNextRound(state);
-}
-
-export function startNextRound(state: GameState): void {
-  state.player.field = [];
-  state.player.hand = [];
-  rebuildDeck(state);
   state.phase = 'placing';
-  drawAllToHand(state);
+  refillHand(state);
   spawnEnemyWave(state);
 }
 
-function awardCrystals(state: GameState, playerDead: CardInstance[]): void {
-  const survived = state.player.field.length;
+function pickTarget(
+  enemyField: (CardInstance | null)[],
+  attackerSlot: number,
+  ranged: boolean,
+): CardInstance | null {
+  const front = enemyField[frontOf(attackerSlot)];
+  const back  = enemyField[backOf(attackerSlot)];
+  const frontAlive = !!(front && front.currentHp > 0);
+  const backAlive  = !!(back  && back.currentHp  > 0);
 
+  if (ranged) {
+    if (backAlive)  return back;
+    if (frontAlive) return front;
+  } else {
+    if (frontAlive) return front;
+    if (backAlive)  return back;
+  }
+  return null;
+}
+
+function awardCrystals(state: GameState, playerDead: CardInstance[]): void {
+  const survived = aliveCount(state.player);
   if (survived === 0) {
     state.log.push(`❌ Поражение в раунде. 💎 +0`);
     return;
   }
-
   if (playerDead.length === 0) {
     state.crystals += REWARD_FLAWLESS;
     state.log.push(`✨ Победа без потерь! 💎 +${REWARD_FLAWLESS}`);
@@ -372,9 +495,14 @@ function awardCrystals(state: GameState, playerDead: CardInstance[]): void {
   }
 }
 
-function tickStartOfTurn(field: CardInstance[], log: string[], owner: string, events: BattleEvent[]): void {
+function tickStartOfTurn(
+  field: (CardInstance | null)[],
+  log: string[],
+  owner: string,
+  events: BattleEvent[],
+): void {
   for (const card of field) {
-    if (card.currentHp <= 0) continue;
+    if (!card || card.currentHp <= 0) continue;
     const def = CATALOG[card.defId];
 
     if (hasAbility(card, 'regen') && card.currentHp < def.health) {
@@ -393,10 +521,16 @@ function tickStartOfTurn(field: CardInstance[], log: string[], owner: string, ev
   }
 }
 
-function cleanupField(side: Side, log: string[], isPlayer: boolean, events: BattleEvent[]): CardInstance[] {
+function cleanupField(
+  side: Side,
+  log: string[],
+  isPlayer: boolean,
+  events: BattleEvent[],
+): CardInstance[] {
   const dead: CardInstance[] = [];
-  side.field = side.field.filter(c => {
-    if (c.currentHp <= 0) {
+  for (let i = 0; i < FIELD_SLOTS; i++) {
+    const c = side.field[i];
+    if (c && c.currentHp <= 0) {
       dead.push(c);
       if (isPlayer) {
         side.lost.push(c);
@@ -407,14 +541,18 @@ function cleanupField(side: Side, log: string[], isPlayer: boolean, events: Batt
         cardId: c.instanceId,
         side: isPlayer ? 'player' : 'enemy',
       });
-      return false;
+      side.field[i] = null;
     }
-    return true;
-  });
+  }
   return dead;
 }
 
-function fightPair(pc: CardInstance, ec: CardInstance, idx: number, state: GameState): void {
+function fightPair(
+  pc: CardInstance,
+  ec: CardInstance,
+  slot: number,
+  state: GameState,
+): void {
   const pDef = CATALOG[pc.defId];
   const eDef = CATALOG[ec.defId];
 
@@ -434,11 +572,11 @@ function fightPair(pc: CardInstance, ec: CardInstance, idx: number, state: GameS
 
   if (hasAbility(pc, 'splash')) {
     const dmg = Math.floor(pDef.attack / SPLASH_DIVISOR);
-    splashAround(state.enemy.field, idx, dmg, state, `💥 Ваш ${pDef.name} задевает`);
+    splashAround(state.enemy.field, slot, dmg, state, `💥 Ваш ${pDef.name} задевает`);
   }
   if (hasAbility(ec, 'splash')) {
     const dmg = Math.floor(eDef.attack / SPLASH_DIVISOR);
-    splashAround(state.player.field, idx, dmg, state, `💥 Вражеский ${eDef.name} задевает`);
+    splashAround(state.player.field, slot, dmg, state, `💥 Вражеский ${eDef.name} задевает`);
   }
 }
 
@@ -503,16 +641,23 @@ function strikeOnce(
 }
 
 function splashAround(
-  field: CardInstance[],
-  targetIdx: number,
+  field: (CardInstance | null)[],
+  slot: number,
   dmg: number,
   state: GameState,
   prefix: string,
 ): void {
   if (dmg <= 0) return;
+  const row = slotRow(slot);
+  const col = slotCol(slot);
+
   for (const offset of [-1, 1]) {
-    const neighbor = field[targetIdx + offset];
+    const nc = col + offset;
+    if (nc < 0 || nc >= FIELD_COLS) continue;
+    const idx = row * FIELD_COLS + nc;
+    const neighbor = field[idx];
     if (!neighbor || neighbor.currentHp <= 0) continue;
+
     let d = dmg;
     if (neighbor.shield > 0) {
       const absorbed = Math.min(neighbor.shield, d);
@@ -584,10 +729,11 @@ export function openPack(state: GameState): void {
   state.log = [`🎁 Пак: ${rolled.map(c => CATALOG[c.defId].name).join(', ')}`];
 
   if (state.phase === 'pack') {
-    startNextRound(state);
+    // Пак за окончание боя — возвращаемся в меню
+    state.phase = 'placing';
+    goToMenu(state);
   } else if (state.screen === 'menu') {
-    rebuildDeck(state);
-    drawAllToHand(state);
+    refillHand(state);
   }
 }
 
@@ -598,8 +744,7 @@ export function buyPack(state: GameState): boolean {
   state.log = [`💎 Куплен пак за ${PACK_PRICE}: ${rolled.map(c => CATALOG[c.defId].name).join(', ')}`];
 
   if (state.screen === 'menu') {
-    rebuildDeck(state);
-    drawAllToHand(state);
+    refillHand(state);
   }
   return true;
 }
@@ -613,6 +758,12 @@ function rollRarity(rng: RNG, weights: Record<string, number>): string {
     if (r <= 0) return k;
   }
   return entries[0][0];
+}
+
+export function startNextRound(state: GameState): void {
+  state.phase = 'placing';
+  refillHand(state);
+  spawnEnemyWave(state);
 }
 
 // ---------- СОРТИРОВКА / ФИЛЬТР ----------

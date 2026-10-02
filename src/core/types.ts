@@ -1,5 +1,6 @@
 export type CardId = string;
 export type Rarity = 'common' | 'rare' | 'epic';
+export type AttackType = 'melee' | 'ranged';
 
 export type AbilityId =
   | 'first_strike'
@@ -17,6 +18,7 @@ export interface CardDef {
   attack: number;
   health: number;
   rarity: Rarity;
+  attackType: AttackType;
   abilities: AbilityId[];
 }
 
@@ -28,16 +30,13 @@ export interface CardInstance {
   poison: number;
 }
 
+// Поле — 8 слотов: [0..3] передний ряд, [4..7] задний
 export interface Side {
-  deck: CardInstance[];
   hand: CardInstance[];
-  field: CardInstance[];
+  field: (CardInstance | null)[];
   lost: CardInstance[];
 }
 
-export type Phase = 'placing' | 'battle' | 'pack' | 'spoils';
-export type Screen = 'menu' | 'battle';
-export type MenuTab = 'battle' | 'rating' | 'inventory' | 'packs';
 export type BattleEvent =
   | { type: 'attack';     attackerId: string; defenderId: string; damage: number }
   | { type: 'splash';     targetId: string; damage: number }
@@ -46,3 +45,7 @@ export type BattleEvent =
   | { type: 'poison';     targetId: string; stacks: number }
   | { type: 'poisonTick'; targetId: string; damage: number }
   | { type: 'death';      cardId: string; side: 'player' | 'enemy' };
+
+export type Phase = 'placing' | 'battle' | 'pack' | 'spoils';
+export type Screen = 'menu' | 'battle';
+export type MenuTab = 'battle' | 'rating' | 'inventory' | 'packs';

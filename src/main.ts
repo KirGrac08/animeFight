@@ -1,14 +1,14 @@
 import './style.css';
-import { ABILITY_INFO, CATALOG, PACK_PRICE, MIN_DECK_SIZE, MAX_DECK_SIZE } from './core/cards';
+import {
+  ABILITY_INFO, CATALOG, PACK_PRICE,
+  MIN_DECK_SIZE, MAX_DECK_SIZE,
+  FIELD_SLOTS,
+} from './core/cards';
 import * as G from './core/game';
 import * as Auth from './auth';
 import type { CardInstance, MenuTab, BattleEvent } from './core/types';
 
 const app = document.getElementById('app')!;
-
-// ============================================================
-// UI-состояние
-// ============================================================
 
 type AuthTab = 'login' | 'register';
 
@@ -29,14 +29,16 @@ const ui: AppUi = {
 let state: G.GameState | null = null;
 let isAnimating = false;
 
-// ============================================================
-// Настройки анимации
-// ============================================================
+interface DragState {
+  instanceId?: string;
+  fromSlot?: number;
+}
+let drag: DragState | null = null;
 
 const ANIM = {
   beforeBattle:  500,
   afterBattle:   700,
-  preAttack:      80,
+  preAttack:     80,
   preDeath:      150,
   duration: {
     attack:      550,
@@ -67,13 +69,16 @@ interface CardOpts {
   partialDeck?: boolean;
   showCount?: number;
   deckToggle?: () => void;
+  small?: boolean;
 }
 
 function cardEl(card: CardInstance, opts: CardOpts = {}): HTMLElement {
   const def = CATALOG[card.defId];
   const el = document.createElement('div');
   el.className = `card ${def.rarity}`;
+  if (opts.small) el.classList.add('small');
   el.dataset.cardId = card.instanceId;
+  el.dataset.attackType = def.attackType;
 
   if (opts.inDeck) el.classList.add('in-deck');
   if (opts.partialDeck) el.classList.add('partially-in-deck');
@@ -84,19 +89,21 @@ function cardEl(card: CardInstance, opts: CardOpts = {}): HTMLElement {
     a => `${ABILITY_INFO[a].icon} ${ABILITY_INFO[a].label} — ${ABILITY_INFO[a].desc}`,
   );
   el.title = [
-    `${def.name} (${def.rarity})`,
+    `${def.name} (${def.rarity}, ${def.attackType === 'ranged' ? 'дальний' : 'ближний'})`,
     `⚔ ${def.attack}   ❤ ${def.health}`,
     abilityLines.length ? '' : null,
     ...abilityLines,
   ].filter(Boolean).join('\n');
 
   const abilitiesIcons = def.abilities.map(a => ABILITY_INFO[a].icon).join(' ');
+  const typeIcon = def.attackType === 'ranged' ? '🎯' : '💪';
 
   let badges = '';
   if (card.shield > 0) badges += `<div class="badge shield">🛡 ${card.shield}</div>`;
   if (card.poison > 0) badges += `<div class="badge poison">☠ ${card.poison}</div>`;
 
   el.innerHTML = `
+    <div class="type-badge">${typeIcon}</div>
     <div class="art">${def.art}</div>
     <div class="name">${def.name}</div>
     <div class="abilities">${abilitiesIcons}</div>
@@ -118,27 +125,6 @@ function cardEl(card: CardInstance, opts: CardOpts = {}): HTMLElement {
     el.addEventListener('click', opts.onClick);
   }
   return el;
-}
-
-function row(label: string, cards: CardInstance[], onCard?: (c: CardInstance) => void): HTMLElement {
-  const wrap = document.createElement('div');
-  wrap.className = 'row';
-  const lbl = document.createElement('div');
-  lbl.className = 'label';
-  lbl.textContent = label;
-  wrap.appendChild(lbl);
-  const field = document.createElement('div');
-  field.className = 'field';
-  if (cards.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'empty';
-    empty.textContent = '—';
-    field.appendChild(empty);
-  } else {
-    cards.forEach(c => field.appendChild(cardEl(c, onCard ? { onClick: () => onCard(c) } : {})));
-  }
-  wrap.appendChild(field);
-  return wrap;
 }
 
 // ============================================================
@@ -323,7 +309,7 @@ function renderBattleTab(root: HTMLElement) {
   panel.innerHTML = `
     <h2>Тренировочный бой</h2>
     <p>Сразись с волной противников. Карты, потерянные в бою, исчезают навсегда.
-    Победа: 💎 +1. Победа без потерь: 💎 +3.</p>
+    Выжившие остаются на поле. Победа: 💎 +1, без потерь: 💎 +3.</p>
     <div class="stats-row">
       <span>🎴 Колода: <b>${active.name}</b></span>
       <span>Размер: <b class="${deckReady ? 'ok' : 'bad'}">${deckSize} / ${MAX_DECK_SIZE}</b>
@@ -434,7 +420,7 @@ function renderPacksTab(root: HTMLElement) {
 }
 
 // ============================================================
-// Инвентарь + управление колодами
+// Инвентарь
 // ============================================================
 
 function deckSelector(): HTMLElement {
@@ -452,10 +438,7 @@ function deckSelector(): HTMLElement {
     const chip = document.createElement('button');
     chip.className = `deck-chip ${deck.id === state!.activeDeckId ? 'active' : ''}`;
     chip.textContent = `${deck.name} (${deck.cardIds.length})`;
-    chip.onclick = () => {
-      G.setActiveDeck(state!, deck.id);
-      render();
-    };
+    chip.onclick = () => { G.setActiveDeck(state!, deck.id); render(); };
     chips.appendChild(chip);
   });
   wrap.appendChild(chips);
@@ -628,6 +611,292 @@ function inventoryContent(): HTMLElement {
 }
 
 // ============================================================
+// Игровое поле
+// ============================================================
+
+function renderBoardSide(
+  side: 'player' | 'enemy',
+  field: (CardInstance | null)[],
+  interactive: boolean,
+): HTMLElement {
+  const board = document.createElement('div');
+  board.className = `board board-${side}`;
+
+  const orderedSlots = [4, 5, 6, 7, 0, 1, 2, 3];
+
+  orderedSlots.forEach((slot, idx) => {
+    if (idx === 4) {
+      const divider = document.createElement('div');
+      divider.className = 'board-divider';
+      board.appendChild(divider);
+    }
+
+    const cell = document.createElement('div');
+    cell.className = 'slot';
+    cell.dataset.slot = String(slot);
+    cell.dataset.side = side;
+
+    if (idx < 4) cell.classList.add('back-row');
+    else cell.classList.add('front-row');
+
+    const card = field[slot];
+    if (card) {
+      const el = cardEl(card, { small: true });
+
+      if (interactive) {
+        el.classList.add('draggable');
+        el.setAttribute('draggable', 'true');
+
+        el.addEventListener('dragstart', (e) => {
+          drag = { fromSlot: slot };
+          e.dataTransfer?.setData('text/plain', card.instanceId);
+          e.dataTransfer!.effectAllowed = 'move';
+          el.classList.add('dragging');
+        });
+        el.addEventListener('dragend', () => {
+          el.classList.remove('dragging');
+        });
+
+        el.addEventListener('dblclick', (e) => {
+          e.stopPropagation();
+          if (!state) return;
+          if (state.phase !== 'placing') return;
+          G.returnCardToHand(state, slot);
+          render();
+        });
+      }
+
+      cell.appendChild(el);
+      cell.classList.add('occupied');
+    } else {
+      const empty = document.createElement('div');
+      empty.className = 'slot-empty';
+      cell.appendChild(empty);
+    }
+
+    if (interactive) {
+      setupDropTarget(cell, side, slot);
+    }
+
+    board.appendChild(cell);
+  });
+
+  return board;
+}
+
+function setupDropTarget(cell: HTMLElement, side: 'player' | 'enemy', slot: number): void {
+  cell.addEventListener('dragover', (e) => {
+    if (side !== 'player') return;
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = 'move';
+    cell.classList.add('drop-hover');
+  });
+  cell.addEventListener('dragleave', () => {
+    cell.classList.remove('drop-hover');
+  });
+  cell.addEventListener('drop', (e) => {
+    if (side !== 'player') return;
+    e.preventDefault();
+    e.stopPropagation();
+    cell.classList.remove('drop-hover');
+    if (!state || !drag) return;
+
+    if (drag.instanceId) {
+      G.placeCardInSlot(state, drag.instanceId, slot);
+    } else if (drag.fromSlot !== undefined) {
+      G.swapSlots(state, drag.fromSlot, slot);
+    }
+    drag = null;
+    render();
+  });
+}
+
+// ============================================================
+// Рука
+// ============================================================
+
+function renderHand(): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'hand';
+
+  const label = document.createElement('div');
+  label.className = 'label';
+  label.textContent = `Рука (${state!.player.hand.length}) — перетащи в слот или кликни`;
+  wrap.appendChild(label);
+
+  const field = document.createElement('div');
+  field.className = 'hand-field';
+
+  setupHandDropZone(field);
+
+  if (state!.player.hand.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'Рука пуста';
+    field.appendChild(empty);
+  } else {
+    state!.player.hand.forEach(card => {
+      const el = cardEl(card, { small: true });
+      el.classList.add('draggable', 'in-hand');
+      el.setAttribute('draggable', 'true');
+
+      el.addEventListener('dragstart', (e) => {
+        drag = { instanceId: card.instanceId };
+        e.dataTransfer?.setData('text/plain', card.instanceId);
+        e.dataTransfer!.effectAllowed = 'move';
+        el.classList.add('dragging');
+      });
+      el.addEventListener('dragend', () => el.classList.remove('dragging'));
+
+      el.addEventListener('click', () => {
+        if (!state) return;
+        if (state.phase !== 'placing') return;
+        const free = state.player.field.findIndex(s => s === null);
+        if (free === -1) {
+          alert('Все слоты заняты. Верни карту с поля или начни бой.');
+          return;
+        }
+        G.placeCardInSlot(state, card.instanceId, free);
+        render();
+      });
+
+      field.appendChild(el);
+    });
+  }
+
+  wrap.appendChild(field);
+  return wrap;
+}
+
+function setupHandDropZone(zone: HTMLElement): void {
+  zone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = 'move';
+    zone.classList.add('drop-hover');
+  });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drop-hover'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('drop-hover');
+    if (!state || !drag) return;
+    if (drag.fromSlot !== undefined) {
+      G.returnCardToHand(state, drag.fromSlot);
+      drag = null;
+      render();
+    }
+  });
+}
+
+// ============================================================
+// Экран боя
+// ============================================================
+
+function renderBattleScreen() {
+  app.appendChild(renderTopBar());
+
+  const header = document.createElement('div');
+  header.className = 'header';
+
+  const stats = [
+    `🌀 Ход ${state!.turn}`,
+    `✋ Рука: ${state!.player.hand.length}`,
+    `⚔ На поле: ${G.aliveCount(state!.player)}/${FIELD_SLOTS}`,
+    `🪦 Потеряно: ${state!.player.lost.length}`,
+    `🏆 Трофеи: ${state!.spoils.length}`,
+    `💎 ${state!.crystals}`,
+  ];
+  stats.forEach(s => {
+    const span = document.createElement('span');
+    span.textContent = s;
+    header.appendChild(span);
+  });
+
+  const invBtn = document.createElement('button');
+  invBtn.className = 'icon-btn';
+  invBtn.textContent = `📦 (${state!.collection.length})`;
+  invBtn.disabled = isAnimating;
+  invBtn.onclick = () => { G.toggleInventory(state!); render(); };
+  header.appendChild(invBtn);
+
+  const menuBtn = document.createElement('button');
+  menuBtn.className = 'icon-btn';
+  menuBtn.textContent = '☰ Меню';
+  menuBtn.disabled = isAnimating;
+  menuBtn.onclick = () => { G.goToMenu(state!); render(); };
+  header.appendChild(menuBtn);
+
+  app.appendChild(header);
+
+  const arena = document.createElement('div');
+  arena.className = 'arena';
+
+  const enemyLabel = document.createElement('div');
+  enemyLabel.className = 'arena-label';
+  enemyLabel.textContent = '🔴 ПРОТИВНИК';
+  arena.appendChild(enemyLabel);
+
+  arena.appendChild(renderBoardSide('enemy', state!.enemy.field, false));
+
+  const centerLine = document.createElement('div');
+  centerLine.className = 'arena-center';
+  arena.appendChild(centerLine);
+
+  arena.appendChild(renderBoardSide('player', state!.player.field, !isAnimating));
+
+  const playerLabel = document.createElement('div');
+  playerLabel.className = 'arena-label';
+  playerLabel.textContent = '🟢 ВЫ';
+  arena.appendChild(playerLabel);
+
+  app.appendChild(arena);
+
+  app.appendChild(renderHand());
+
+  const controls = document.createElement('div');
+  controls.className = 'controls';
+
+  if (isAnimating) {
+    const btn = document.createElement('button');
+    btn.textContent = '⚔️ Бой...';
+    btn.disabled = true;
+    controls.appendChild(btn);
+  } else if (state!.phase === 'placing') {
+    const btn = document.createElement('button');
+    btn.textContent = '⚔️ В бой';
+    btn.disabled = G.aliveCount(state!.player) === 0;
+    btn.onclick = () => { animateBattle(); };
+    controls.appendChild(btn);
+  } else if (state!.phase === 'pack') {
+    const btn = document.createElement('button');
+    btn.className = 'pack';
+    btn.textContent = '🎁 Открыть пак';
+    btn.onclick = () => { G.openPack(state!); render(); };
+    controls.appendChild(btn);
+
+    const toMenuBtn = document.createElement('button');
+    toMenuBtn.className = 'btn-secondary';
+    toMenuBtn.textContent = '↩ Вернуться в меню';
+    toMenuBtn.onclick = () => { G.goToMenu(state!); render(); };
+    controls.appendChild(toMenuBtn);
+  }
+  app.appendChild(controls);
+
+  const log = document.createElement('div');
+  log.className = 'log';
+  state!.log.forEach(l => {
+    const line = document.createElement('div');
+    line.textContent = l;
+    log.appendChild(line);
+  });
+  app.appendChild(log);
+
+  if (!isAnimating) {
+    if (state!.phase === 'spoils') renderSpoilsOverlay();
+    if (state!.showInventory)     renderInventoryOverlay();
+  }
+}
+
+// ============================================================
 // Анимации боя
 // ============================================================
 
@@ -684,8 +953,22 @@ function flashEvent(ev: BattleEvent): void {
   }
 }
 
-function applyEventToField(player: CardInstance[], enemy: CardInstance[], ev: BattleEvent): void {
-  const find = (id: string) => [...player, ...enemy].find(c => c.instanceId === id);
+function applyEventToField(
+  player: (CardInstance | null)[],
+  enemy: (CardInstance | null)[],
+  ev: BattleEvent,
+): void {
+  const find = (id: string): CardInstance | undefined => {
+    for (const c of [...player, ...enemy]) {
+      if (c && c.instanceId === id) return c;
+    }
+    return undefined;
+  };
+
+  const removeCard = (arr: (CardInstance | null)[], id: string): void => {
+    const idx = arr.findIndex(c => c && c.instanceId === id);
+    if (idx >= 0) arr[idx] = null;
+  };
 
   switch (ev.type) {
     case 'attack': {
@@ -716,8 +999,7 @@ function applyEventToField(player: CardInstance[], enemy: CardInstance[], ev: Ba
     }
     case 'death': {
       const arr = ev.side === 'player' ? player : enemy;
-      const idx = arr.findIndex(c => c.instanceId === ev.cardId);
-      if (idx >= 0) arr.splice(idx, 1);
+      removeCard(arr, ev.cardId);
       break;
     }
   }
@@ -725,7 +1007,10 @@ function applyEventToField(player: CardInstance[], enemy: CardInstance[], ev: Ba
 
 function getCardById(id: string): CardInstance | undefined {
   if (!state) return undefined;
-  return [...state.player.field, ...state.enemy.field].find(c => c.instanceId === id);
+  for (const c of [...state.player.field, ...state.enemy.field]) {
+    if (c && c.instanceId === id) return c;
+  }
+  return undefined;
 }
 
 function updateCardDom(id: string, card: CardInstance | undefined): void {
@@ -772,17 +1057,27 @@ function updateCardDom(id: string, card: CardInstance | undefined): void {
 function removeCardDom(id: string): void {
   const el = getCardEl(id);
   if (!el) return;
-  setTimeout(() => el.remove(), ANIM.duration.death);
+  setTimeout(() => {
+    const parent = el.parentElement;
+    el.remove();
+    if (parent && !parent.querySelector('.card')) {
+      parent.classList.remove('occupied');
+      const empty = document.createElement('div');
+      empty.className = 'slot-empty';
+      parent.appendChild(empty);
+    }
+  }, ANIM.duration.death);
 }
 
 async function animateBattle(): Promise<void> {
   if (!state || isAnimating) return;
-  if (state.phase !== 'placing' || state.player.field.length === 0) return;
+  if (state.phase !== 'placing') return;
+  if (G.aliveCount(state.player) === 0) return;
 
   isAnimating = true;
 
-  const displayPlayer = state.player.field.map(c => ({ ...c }));
-  const displayEnemy  = state.enemy.field.map(c => ({ ...c }));
+  const displayPlayer = state.player.field.map(c => c ? { ...c } : null);
+  const displayEnemy  = state.enemy.field.map(c => c ? { ...c } : null);
 
   G.resolveBattle(state);
   const events = state.battleEvents.slice();
@@ -822,7 +1117,6 @@ async function animateBattle(): Promise<void> {
 
   state.player.field = postPlayer;
   state.enemy.field  = postEnemy;
-
   await sleep(ANIM.afterBattle);
 
   isAnimating = false;
@@ -830,91 +1124,8 @@ async function animateBattle(): Promise<void> {
 }
 
 // ============================================================
-// Экран боя
+// Оверлеи
 // ============================================================
-
-function renderBattleScreen() {
-  app.appendChild(renderTopBar());
-
-  const header = document.createElement('div');
-  header.className = 'header';
-
-  const stats = [
-    `🌀 Ход ${state!.turn}`,
-    `📚 Осталось: ${state!.player.deck.length}`,
-    `✋ Рука: ${state!.player.hand.length}`,
-    `🪦 Потеряно: ${state!.player.lost.length}`,
-    `💎 ${state!.crystals}`,
-  ];
-  stats.forEach(s => {
-    const span = document.createElement('span');
-    span.textContent = s;
-    header.appendChild(span);
-  });
-
-  const invBtn = document.createElement('button');
-  invBtn.className = 'icon-btn';
-  invBtn.textContent = `📦 (${state!.collection.length})`;
-  invBtn.disabled = isAnimating;
-  invBtn.onclick = () => { G.toggleInventory(state!); render(); };
-  header.appendChild(invBtn);
-
-  const menuBtn = document.createElement('button');
-  menuBtn.className = 'icon-btn';
-  menuBtn.textContent = '☰ Меню';
-  menuBtn.disabled = isAnimating;
-  menuBtn.onclick = () => { G.goToMenu(state!); render(); };
-  header.appendChild(menuBtn);
-
-  app.appendChild(header);
-
-  app.appendChild(row('Враг', state!.enemy.field));
-  app.appendChild(row('Ваше поле', state!.player.field));
-
-  const handRow = row('Рука', state!.player.hand, (c) => {
-    if (isAnimating) return;
-    if (G.placeCard(state!, c.instanceId)) render();
-  });
-  handRow.classList.add('hand');
-  app.appendChild(handRow);
-
-  const controls = document.createElement('div');
-  controls.className = 'controls';
-
-  if (isAnimating) {
-    const btn = document.createElement('button');
-    btn.textContent = '⚔️ Бой...';
-    btn.disabled = true;
-    controls.appendChild(btn);
-  } else if (state!.phase === 'placing') {
-    const btn = document.createElement('button');
-    btn.textContent = '⚔️ В бой';
-    btn.disabled = state!.player.field.length === 0;
-    btn.onclick = () => { animateBattle(); };
-    controls.appendChild(btn);
-  } else if (state!.phase === 'pack') {
-    const btn = document.createElement('button');
-    btn.className = 'pack';
-    btn.textContent = '🎁 Открыть пак';
-    btn.onclick = () => { G.openPack(state!); render(); };
-    controls.appendChild(btn);
-  }
-  app.appendChild(controls);
-
-  const log = document.createElement('div');
-  log.className = 'log';
-  state!.log.forEach(l => {
-    const line = document.createElement('div');
-    line.textContent = l;
-    log.appendChild(line);
-  });
-  app.appendChild(log);
-
-  if (!isAnimating) {
-    if (state!.phase === 'spoils') renderSpoilsOverlay();
-    if (state!.showInventory)     renderInventoryOverlay();
-  }
-}
 
 function renderSpoilsOverlay() {
   const overlay = document.createElement('div');
@@ -922,12 +1133,12 @@ function renderSpoilsOverlay() {
 
   const title = document.createElement('div');
   title.className = 'spoils-title';
-  title.textContent = '🏆 Трофеи боя';
+  title.textContent = '🏆 Трофеи за сражение';
   overlay.appendChild(title);
 
   const hint = document.createElement('div');
   hint.className = 'spoils-hint';
-  hint.textContent = 'Выберите одну карту, чтобы забрать её в коллекцию';
+  hint.textContent = `Собрано за бой: ${state!.spoils.length}. Возьмите одну карту в коллекцию.`;
   overlay.appendChild(hint);
 
   const cards = document.createElement('div');
