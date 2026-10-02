@@ -35,3 +35,5 @@ export const SPLASH_DIVISOR = 2;
 export const PACK_PRICE = 12;   // 💎 за пак
 export const REWARD_WIN = 1;
 export const REWARD_FLAWLESS = 3;
+export const MIN_DECK_SIZE = 3;
+export const MAX_DECK_SIZE = 15;

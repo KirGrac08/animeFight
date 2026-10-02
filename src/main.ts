@@ -1,14 +1,10 @@
 import './style.css';
-import { ABILITY_INFO, CATALOG, PACK_PRICE } from './core/cards';
+import { ABILITY_INFO, CATALOG, PACK_PRICE, MIN_DECK_SIZE, MAX_DECK_SIZE } from './core/cards';
 import * as G from './core/game';
 import * as Auth from './auth';
 import type { CardInstance, MenuTab } from './core/types';
 
 const app = document.getElementById('app')!;
-
-// ============================================================
-// Состояние приложения (экран входа / игра)
-// ============================================================
 
 type AuthTab = 'login' | 'register';
 
@@ -28,7 +24,6 @@ const ui: AppUi = {
 
 let state: G.GameState | null = null;
 
-// Восстанавливаем сессию при запуске
 function bootstrap() {
   const nick = Auth.getSession();
   if (!nick) return;
@@ -41,10 +36,21 @@ function bootstrap() {
 // Карта
 // ============================================================
 
-function cardEl(card: CardInstance, onClick?: () => void): HTMLElement {
+interface CardOpts {
+  onClick?: () => void;
+  inDeck?: boolean;
+  partialDeck?: boolean;
+  showCount?: number;
+  deckToggle?: () => void;
+}
+
+function cardEl(card: CardInstance, opts: CardOpts = {}): HTMLElement {
   const def = CATALOG[card.defId];
   const el = document.createElement('div');
   el.className = `card ${def.rarity}`;
+  if (opts.inDeck) el.classList.add('in-deck');
+  if (opts.partialDeck) el.classList.add('partially-in-deck');
+
   const hpPct = Math.max(0, card.currentHp) / def.health;
 
   const abilityLines = def.abilities.map(
@@ -73,11 +79,16 @@ function cardEl(card: CardInstance, onClick?: () => void): HTMLElement {
     </div>
     <div class="hpbar"><div style="width:${hpPct * 100}%"></div></div>
     ${badges}
+    ${opts.showCount && opts.showCount > 1 ? `<div class="count-badge">×${opts.showCount}</div>` : ''}
+    ${opts.inDeck ? `<div class="deck-mark">✓</div>` : ''}
   `;
 
-  if (onClick) {
+  if (opts.deckToggle) {
     el.classList.add('clickable');
-    el.addEventListener('click', onClick);
+    el.addEventListener('click', opts.deckToggle);
+  } else if (opts.onClick) {
+    el.classList.add('clickable');
+    el.addEventListener('click', opts.onClick);
   }
   return el;
 }
@@ -97,7 +108,7 @@ function row(label: string, cards: CardInstance[], onCard?: (c: CardInstance) =>
     empty.textContent = '—';
     field.appendChild(empty);
   } else {
-    cards.forEach(c => field.appendChild(cardEl(c, onCard ? () => onCard(c) : undefined)));
+    cards.forEach(c => field.appendChild(cardEl(c, onCard ? { onClick: () => onCard(c) } : {})));
   }
   wrap.appendChild(field);
   return wrap;
@@ -119,7 +130,6 @@ function renderAuthScreen() {
   const panel = document.createElement('div');
   panel.className = 'auth-panel';
 
-  // Табы
   const tabs = document.createElement('div');
   tabs.className = 'auth-tabs';
   (['login', 'register'] as AuthTab[]).forEach(tab => {
@@ -131,7 +141,6 @@ function renderAuthScreen() {
   });
   panel.appendChild(tabs);
 
-  // Поля
   const nickInput = document.createElement('input');
   nickInput.type = 'text';
   nickInput.placeholder = 'Ник';
@@ -152,7 +161,6 @@ function renderAuthScreen() {
       } else {
         await Auth.login(nick, pass);
       }
-      // Успех — входим
       ui.currentUser = nick;
       Auth.setSession(nick);
       state = Auth.loadGame(nick) ?? G.createInitialState();
@@ -186,7 +194,7 @@ function renderAuthScreen() {
 
   const hint = document.createElement('div');
   hint.className = 'auth-hint';
-  hint.textContent = 'Данные хранятся локально в браузере. Для реального мультиплеера нужен сервер.';
+  hint.textContent = 'Данные хранятся локально в браузере.';
   panel.appendChild(hint);
 
   wrap.appendChild(panel);
@@ -194,7 +202,7 @@ function renderAuthScreen() {
 }
 
 // ============================================================
-// Общая верхняя панель (ник, кристаллы, выход)
+// Верхняя панель
 // ============================================================
 
 function renderTopBar(): HTMLElement {
@@ -229,13 +237,12 @@ function renderTopBar(): HTMLElement {
 }
 
 // ============================================================
-// МЕНЮ
+// Меню
 // ============================================================
 
 function renderMenu() {
   const menu = document.createElement('div');
   menu.className = 'menu';
-
   menu.appendChild(renderTopBar());
 
   const title = document.createElement('h1');
@@ -248,7 +255,7 @@ function renderMenu() {
   const tabDefs: { id: MenuTab; label: string }[] = [
     { id: 'battle',    label: '⚔️ Бой' },
     { id: 'rating',    label: '🏆 Рейтинг' },
-    { id: 'inventory', label: '📦 Инвентарь' },
+    { id: 'inventory', label: '📦 Коллекция' },
     { id: 'packs',     label: `🎁 Паки${state!.packs > 0 ? ` (${state!.packs})` : ''}` },
   ];
   tabDefs.forEach(({ id, label }) => {
@@ -274,33 +281,48 @@ function renderMenu() {
 }
 
 function renderBattleTab(root: HTMLElement) {
-  const card = document.createElement('div');
-  card.className = 'menu-panel';
-  card.innerHTML = `
+  const deckReady = G.isDeckReady(state!);
+  const deckSize = state!.deckIds.length;
+
+  const panel = document.createElement('div');
+  panel.className = 'menu-panel';
+  panel.innerHTML = `
     <h2>Тренировочный бой</h2>
     <p>Сразись с волной противников. Карты, потерянные в бою, исчезают навсегда.
-    Победа: 💎 +1. Победа без потерь: 💎 +3. Поражение: 💎 +0.</p>
+    Победа: 💎 +1. Победа без потерь: 💎 +3.</p>
     <div class="stats-row">
-      <span>📚 Колода: ${state!.player.deck.length}</span>
-      <span>✋ Рука: ${state!.player.hand.length}</span>
+      <span>🎴 Дека: <b class="${deckReady ? 'ok' : 'bad'}">${deckSize} / ${MAX_DECK_SIZE}</b>
+            <small>(мин. ${MIN_DECK_SIZE})</small></span>
+      <span>📦 Коллекция: ${state!.collection.length}</span>
       <span>🪦 Потеряно: ${state!.player.lost.length}</span>
-      <span>💎 Кристаллы: ${state!.crystals}</span>
+      <span>💎 ${state!.crystals}</span>
     </div>
   `;
 
+  const btnRow = document.createElement('div');
+  btnRow.className = 'controls';
+
   const btn = document.createElement('button');
   btn.className = 'primary-btn';
-  btn.textContent = '⚔️ Начать бой';
-  btn.disabled = state!.player.deck.length + state!.player.hand.length === 0;
+  btn.textContent = deckReady ? '⚔️ Начать бой' : `⚠️ Собери деку (${deckSize}/${MIN_DECK_SIZE})`;
+  btn.disabled = !deckReady;
   btn.onclick = () => { G.goToBattle(state!); render(); };
-  card.appendChild(btn);
+  btnRow.appendChild(btn);
+
+  const toInv = document.createElement('button');
+  toInv.className = 'btn-secondary';
+  toInv.textContent = '📦 Собрать деку';
+  toInv.onclick = () => { G.setMenuTab(state!, 'inventory'); render(); };
+  btnRow.appendChild(toInv);
+
+  panel.appendChild(btnRow);
 
   const soon = document.createElement('div');
   soon.className = 'soon';
   soon.textContent = '🌐 Подбор реальных противников — скоро';
-  card.appendChild(soon);
+  panel.appendChild(soon);
 
-  root.appendChild(card);
+  root.appendChild(panel);
 }
 
 function renderRatingTab(root: HTMLElement) {
@@ -377,11 +399,65 @@ function renderPacksTab(root: HTMLElement) {
 }
 
 // ============================================================
-// ИНВЕНТАРЬ
+// Инвентарь
 // ============================================================
 
 function inventoryContent(): HTMLElement {
   const wrap = document.createElement('div');
+
+  const deckInfo = document.createElement('div');
+  deckInfo.className = 'deck-info';
+  const inDeck = state!.deckIds.length;
+  const ready = G.isDeckReady(state!);
+  deckInfo.innerHTML = `
+    🎴 В боевой деке: <b class="${ready ? 'ok' : 'bad'}">${inDeck} / ${MAX_DECK_SIZE}</b>
+    <small>(минимум ${MIN_DECK_SIZE})</small>
+    &nbsp;·&nbsp; клик по карте — добавить/убрать
+  `;
+  wrap.appendChild(deckInfo);
+
+  const sortRow = document.createElement('div');
+  sortRow.className = 'controls-row';
+  const sortLabel = document.createElement('span');
+  sortLabel.className = 'ctrl-label';
+  sortLabel.textContent = 'Сортировка:';
+  sortRow.appendChild(sortLabel);
+  const sorts: { id: G.InventorySort; label: string }[] = [
+    { id: 'default', label: 'По умолчанию' },
+    { id: 'name',    label: 'По имени' },
+    { id: 'attack',  label: 'По атаке' },
+    { id: 'health',  label: 'По HP' },
+    { id: 'rarity',  label: 'По редкости' },
+  ];
+  sorts.forEach(s => {
+    const btn = document.createElement('button');
+    btn.className = `chip ${state!.inventorySort === s.id ? 'active' : ''}`;
+    btn.textContent = s.label;
+    btn.onclick = () => { G.setInventorySort(state!, s.id); render(); };
+    sortRow.appendChild(btn);
+  });
+  wrap.appendChild(sortRow);
+
+  const filterRow = document.createElement('div');
+  filterRow.className = 'controls-row';
+  const filterLabel = document.createElement('span');
+  filterLabel.className = 'ctrl-label';
+  filterLabel.textContent = 'Фильтр:';
+  filterRow.appendChild(filterLabel);
+  const filters: { id: G.InventoryFilter; label: string }[] = [
+    { id: 'all',    label: 'Все' },
+    { id: 'common', label: 'Обычные' },
+    { id: 'rare',   label: 'Редкие' },
+    { id: 'epic',   label: 'Эпические' },
+  ];
+  filters.forEach(f => {
+    const btn = document.createElement('button');
+    btn.className = `chip ${state!.inventoryFilter === f.id ? 'active' : ''}`;
+    btn.textContent = f.label;
+    btn.onclick = () => { G.setInventoryFilter(state!, f.id); render(); };
+    filterRow.appendChild(btn);
+  });
+  wrap.appendChild(filterRow);
 
   const colTitle = document.createElement('h3');
   colTitle.textContent = `Коллекция (${state!.collection.length})`;
@@ -389,25 +465,35 @@ function inventoryContent(): HTMLElement {
 
   const colGrid = document.createElement('div');
   colGrid.className = 'inventory-grid';
-  if (state!.collection.length === 0) {
+  const visible = G.sortAndFilterCollection(state!);
+
+  if (visible.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty';
     empty.textContent = 'Пусто';
     colGrid.appendChild(empty);
   } else {
-    const counts = new Map<string, CardInstance>();
-    for (const c of state!.collection) {
-      if (!counts.has(c.defId)) counts.set(c.defId, c);
-    }
-    counts.forEach((sample, defId) => {
-      const count = state!.collection.filter(c => c.defId === defId).length;
-      const el = cardEl(sample);
-      if (count > 1) {
-        const badge = document.createElement('div');
-        badge.className = 'count-badge';
-        badge.textContent = `×${count}`;
-        el.appendChild(badge);
-      }
+    visible.forEach(sample => {
+      const count = G.countByDefId(state!, sample.defId);
+      const inDeckCount = G.countInDeckByDefId(state!, sample.defId);
+      const allInDeck = inDeckCount === count && count > 0;
+      const someInDeck = inDeckCount > 0 && inDeckCount < count;
+
+      const el = cardEl(sample, {
+        showCount: count,
+        inDeck: allInDeck,
+        partialDeck: someInDeck,
+        deckToggle: () => {
+          // Найдём копию этого defId, которую нужно переключить
+          const copies = state!.collection.filter(c => c.defId === sample.defId);
+          const target = allInDeck
+            ? copies.find(c => G.isInDeck(state!, c.instanceId))          // убрать одну
+            : copies.find(c => !G.isInDeck(state!, c.instanceId));         // добавить одну
+          if (!target) return;
+          G.toggleCardInDeck(state!, target.instanceId);
+          render();
+        },
+      });
       colGrid.appendChild(el);
     });
   }
@@ -421,20 +507,15 @@ function inventoryContent(): HTMLElement {
 
     const lostGrid = document.createElement('div');
     lostGrid.className = 'inventory-grid';
-    const lostCounts = new Map<string, CardInstance>();
+    const lostCounts = new Map<string, { sample: CardInstance; count: number }>();
     for (const c of state!.player.lost) {
-      if (!lostCounts.has(c.defId)) lostCounts.set(c.defId, c);
+      const e = lostCounts.get(c.defId);
+      if (e) e.count++;
+      else lostCounts.set(c.defId, { sample: c, count: 1 });
     }
-    lostCounts.forEach((sample, defId) => {
-      const count = state!.player.lost.filter(c => c.defId === defId).length;
-      const el = cardEl(sample);
+    lostCounts.forEach(({ sample, count }) => {
+      const el = cardEl(sample, { showCount: count });
       el.classList.add('lost');
-      if (count > 1) {
-        const badge = document.createElement('div');
-        badge.className = 'count-badge';
-        badge.textContent = `×${count}`;
-        el.appendChild(badge);
-      }
       lostGrid.appendChild(el);
     });
     wrap.appendChild(lostGrid);
@@ -444,7 +525,7 @@ function inventoryContent(): HTMLElement {
 }
 
 // ============================================================
-// БОЙ
+// Бой
 // ============================================================
 
 function renderBattleScreen() {
@@ -455,10 +536,10 @@ function renderBattleScreen() {
 
   const stats = [
     `🌀 Ход ${state!.turn}`,
-    `📚 Колода: ${state!.player.deck.length}`,
+    `🎴 Дека: ${state!.deckIds.length}`,
+    `📚 Осталось: ${state!.player.deck.length}`,
     `✋ Рука: ${state!.player.hand.length}`,
     `🪦 Потеряно: ${state!.player.lost.length}`,
-    `🎁 Паки: ${state!.packs}`,
     `💎 ${state!.crystals}`,
   ];
   stats.forEach(s => {
@@ -537,9 +618,11 @@ function renderSpoilsOverlay() {
   const cards = document.createElement('div');
   cards.className = 'spoils-cards';
   state!.spoils.forEach(c => {
-    cards.appendChild(cardEl(c, () => {
-      G.takeSpoil(state!, c.instanceId);
-      render();
+    cards.appendChild(cardEl(c, {
+      onClick: () => {
+        G.takeSpoil(state!, c.instanceId);
+        render();
+      },
     }));
   });
   overlay.appendChild(cards);
@@ -566,7 +649,7 @@ function renderInventoryOverlay() {
   const header = document.createElement('div');
   header.className = 'inventory-header';
   const h2 = document.createElement('h2');
-  h2.textContent = '📦 Инвентарь';
+  h2.textContent = '📦 Коллекция';
   header.appendChild(h2);
   const closeBtn = document.createElement('button');
   closeBtn.className = 'btn-secondary';
@@ -581,11 +664,10 @@ function renderInventoryOverlay() {
 }
 
 // ============================================================
-// ГЛАВНЫЙ РЕНДЕР
+// Главный рендер
 // ============================================================
 
 function render() {
-  // Автосохранение после каждого действия в игре
   if (ui.mode === 'game' && state && ui.currentUser) {
     Auth.saveGame(ui.currentUser, state);
   }

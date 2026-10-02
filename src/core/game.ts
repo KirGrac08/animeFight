@@ -2,9 +2,13 @@ import {
   CATALOG, RARITY_WEIGHTS, REGEN_AMOUNT,
   SHIELD_ON_SPAWN, SPLASH_DIVISOR, STARTER_DECK,
   PACK_PRICE, REWARD_WIN, REWARD_FLAWLESS,
+  MIN_DECK_SIZE, MAX_DECK_SIZE,
 } from './cards';
 import { RNG } from './rng';
 import type { AbilityId, CardId, CardInstance, MenuTab, Phase, Screen, Side } from './types';
+
+export type InventorySort = 'default' | 'name' | 'attack' | 'health' | 'rarity';
+export type InventoryFilter = 'all' | 'common' | 'rare' | 'epic';
 
 export interface GameState {
   rng: RNG;
@@ -17,11 +21,14 @@ export interface GameState {
   log: string[];
 
   collection: CardInstance[];
+  deckIds: string[];
   spoils: CardInstance[];
   showInventory: boolean;
 
   screen: Screen;
   menuTab: MenuTab;
+  inventorySort: InventorySort;
+  inventoryFilter: InventoryFilter;
 }
 
 let idCounter = 0;
@@ -34,6 +41,10 @@ export function defHasAbility(defId: CardId, ability: AbilityId): boolean {
 
 export function hasAbility(card: CardInstance, ability: AbilityId): boolean {
   return defHasAbility(card.defId, ability);
+}
+
+export function isInDeck(state: GameState, instanceId: string): boolean {
+  return state.deckIds.includes(instanceId);
 }
 
 function instantiate(defId: CardId): CardInstance {
@@ -51,6 +62,15 @@ function emptySide(): Side {
   return { deck: [], hand: [], field: [], lost: [] };
 }
 
+function shuffle<T>(arr: T[], rng: RNG): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = rng.int(i + 1);
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 // ---------- ИНИЦИАЛИЗАЦИЯ ----------
 
 export function createInitialState(seed?: number): GameState {
@@ -59,20 +79,30 @@ export function createInitialState(seed?: number): GameState {
     rng: new RNG(seed),
     turn: 1,
     phase: 'placing',
-    player: { ...emptySide(), deck },
+    player: { ...emptySide(), deck: [...deck] },
     enemy: emptySide(),
     packs: 1,
     crystals: 0,
     log: ['Добро пожаловать.'],
     collection: [...deck],
+    deckIds: deck.map(c => c.instanceId),
     spoils: [],
     showInventory: false,
     screen: 'menu',
     menuTab: 'battle',
+    inventorySort: 'default',
+    inventoryFilter: 'all',
   };
+  rebuildDeck(state);
   drawUpTo(state, 'player', 3);
   spawnEnemyWave(state);
   return state;
+}
+
+function rebuildDeck(state: GameState): void {
+  const inDeckIds = new Set(state.deckIds);
+  const deck = state.collection.filter(c => inDeckIds.has(c.instanceId));
+  state.player.deck = shuffle(deck, state.rng);
 }
 
 export function drawUpTo(state: GameState, side: 'player' | 'enemy', n: number): void {
@@ -107,12 +137,59 @@ export function placeCard(state: GameState, instanceId: string): boolean {
   return true;
 }
 
+// ---------- ДЕКА ----------
+
+export function toggleCardInDeck(state: GameState, instanceId: string): boolean {
+  // Менять деку можно только вне боя или в начале раунда (пока ничего не выложено)
+  const safe = state.screen === 'menu' ||
+    (state.phase === 'placing' && state.player.field.length === 0);
+  if (!safe) return false;
+
+  const inCollection = state.collection.some(c => c.instanceId === instanceId);
+  if (!inCollection) return false;
+
+  const idx = state.deckIds.indexOf(instanceId);
+  if (idx >= 0) {
+    if (state.deckIds.length <= MIN_DECK_SIZE) return false;
+    state.deckIds.splice(idx, 1);
+  } else {
+    if (state.deckIds.length >= MAX_DECK_SIZE) return false;
+    state.deckIds.push(instanceId);
+  }
+
+  // Если мы в меню или в начале раунда — обновляем деку сразу
+  if (state.screen === 'menu' || (state.phase === 'placing' && state.player.field.length === 0)) {
+    // вернуть руку в пул
+    for (const c of state.player.hand) state.player.deck.push(c);
+    state.player.hand = [];
+    state.player.field = [];
+    rebuildDeck(state);
+    drawUpTo(state, 'player', 3);
+  }
+  return true;
+}
+
+export function setInventorySort(state: GameState, sort: InventorySort): void {
+  state.inventorySort = sort;
+}
+
+export function setInventoryFilter(state: GameState, filter: InventoryFilter): void {
+  state.inventoryFilter = filter;
+}
+
+export function isDeckReady(state: GameState): boolean {
+  return state.deckIds.length >= MIN_DECK_SIZE;
+}
+
+// ---------- НАВИГАЦИЯ ----------
+
 export function goToMenu(state: GameState): void {
   state.screen = 'menu';
   state.showInventory = false;
 }
 
 export function goToBattle(state: GameState): void {
+  if (!isDeckReady(state)) return;
   state.screen = 'battle';
   state.showInventory = false;
 }
@@ -159,6 +236,7 @@ export function resolveBattle(state: GameState): void {
   if (playerDead.length > 0) {
     const deadIds = new Set(playerDead.map(c => c.instanceId));
     state.collection = state.collection.filter(c => !deadIds.has(c.instanceId));
+    state.deckIds = state.deckIds.filter(id => !deadIds.has(id));
   }
 
   if (enemyDead.length > 0) {
@@ -169,10 +247,10 @@ export function resolveBattle(state: GameState): void {
 
   state.turn++;
 
-  const total =
+  const totalDeck =
     state.player.deck.length + state.player.hand.length + state.player.field.length;
 
-  if (total === 0) {
+  if (totalDeck === 0) {
     state.phase = 'pack';
     state.packs++;
     state.log.push('🎁 Все карты потеряны! Доступен пак.');
@@ -188,7 +266,10 @@ export function resolveBattle(state: GameState): void {
   startNextRound(state);
 }
 
-function startNextRound(state: GameState): void {
+export function startNextRound(state: GameState): void {
+  state.player.field = [];
+  state.player.hand = [];
+  rebuildDeck(state);
   state.phase = 'placing';
   drawUpTo(state, 'player', 3);
   spawnEnemyWave(state);
@@ -351,7 +432,9 @@ export function takeSpoil(state: GameState, instanceId: string): void {
   if (idx === -1) return;
   const [card] = state.spoils.splice(idx, 1);
   state.collection.push(card);
-  state.player.deck.push(card);
+  if (state.deckIds.length < MAX_DECK_SIZE) {
+    state.deckIds.push(card.instanceId);
+  }
   state.log.push(`🏆 Получено: ${CATALOG[card.defId].name}`);
   state.spoils = [];
   startNextRound(state);
@@ -374,8 +457,10 @@ function rollPackCards(state: GameState): CardInstance[] {
     const candidates = pool.filter(c => c.rarity === rarity);
     const def = state.rng.pick(candidates.length ? candidates : pool);
     const card = instantiate(def.id);
-    state.player.deck.push(card);
     state.collection.push(card);
+    if (state.deckIds.length < MAX_DECK_SIZE) {
+      state.deckIds.push(card.instanceId);
+    }
     rolled.push(card);
   }
   return rolled;
@@ -386,8 +471,12 @@ export function openPack(state: GameState): void {
   state.packs--;
   const rolled = rollPackCards(state);
   state.log = [`🎁 Пак: ${rolled.map(c => CATALOG[c.defId].name).join(', ')}`];
+
   if (state.phase === 'pack') {
     startNextRound(state);
+  } else if (state.screen === 'menu') {
+    rebuildDeck(state);
+    drawUpTo(state, 'player', 3);
   }
 }
 
@@ -396,6 +485,11 @@ export function buyPack(state: GameState): boolean {
   state.crystals -= PACK_PRICE;
   const rolled = rollPackCards(state);
   state.log = [`💎 Куплен пак за ${PACK_PRICE}: ${rolled.map(c => CATALOG[c.defId].name).join(', ')}`];
+
+  if (state.screen === 'menu') {
+    rebuildDeck(state);
+    drawUpTo(state, 'player', 3);
+  }
   return true;
 }
 
@@ -408,4 +502,56 @@ function rollRarity(rng: RNG, weights: Record<string, number>): string {
     if (r <= 0) return k;
   }
   return entries[0][0];
+}
+
+// ---------- СОРТИРОВКА И ФИЛЬТР ----------
+
+const RARITY_ORDER: Record<string, number> = { common: 0, rare: 1, epic: 2 };
+
+export function sortAndFilterCollection(state: GameState): CardInstance[] {
+  const filter = state.inventoryFilter;
+  const sort = state.inventorySort;
+
+  let list = state.collection.slice();
+  if (filter !== 'all') {
+    list = list.filter(c => CATALOG[c.defId].rarity === filter);
+  }
+
+  const byDef = new Map<string, { sample: CardInstance; count: number }>();
+  for (const c of list) {
+    const existing = byDef.get(c.defId);
+    if (existing) existing.count++;
+    else byDef.set(c.defId, { sample: c, count: 1 });
+  }
+
+  const grouped = [...byDef.values()];
+
+  switch (sort) {
+    case 'name':
+      grouped.sort((a, b) => CATALOG[a.sample.defId].name.localeCompare(CATALOG[b.sample.defId].name));
+      break;
+    case 'attack':
+      grouped.sort((a, b) => CATALOG[b.sample.defId].attack - CATALOG[a.sample.defId].attack);
+      break;
+    case 'health':
+      grouped.sort((a, b) => CATALOG[b.sample.defId].health - CATALOG[a.sample.defId].health);
+      break;
+    case 'rarity':
+      grouped.sort((a, b) =>
+        RARITY_ORDER[CATALOG[b.sample.defId].rarity] - RARITY_ORDER[CATALOG[a.sample.defId].rarity]
+      );
+      break;
+  }
+
+  return grouped.map(g => g.sample);
+}
+
+export function countByDefId(state: GameState, defId: CardId): number {
+  return state.collection.filter(c => c.defId === defId).length;
+}
+
+export function countInDeckByDefId(state: GameState, defId: CardId): number {
+  return state.collection.filter(
+    c => c.defId === defId && state.deckIds.includes(c.instanceId)
+  ).length;
 }
