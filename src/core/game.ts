@@ -2,7 +2,7 @@ import {
   CATALOG, RARITY_WEIGHTS, REGEN_AMOUNT,
   SHIELD_ON_SPAWN, SPLASH_DIVISOR, STARTER_DECK,
   PACK_PRICE, REWARD_WIN, REWARD_FLAWLESS,
-  MIN_DECK_SIZE, MAX_DECK_SIZE,
+  MIN_DECK_SIZE, MAX_DECK_SIZE, MAX_FIELD_SIZE,
 } from './cards';
 import { RNG } from './rng';
 import type { AbilityId, BattleEvent, CardId, CardInstance, MenuTab, Phase, Screen, Side } from './types';
@@ -10,7 +10,13 @@ import type { AbilityId, BattleEvent, CardId, CardInstance, MenuTab, Phase, Scre
 export type InventorySort = 'default' | 'name' | 'attack' | 'health' | 'rarity';
 export type InventoryFilter = 'all' | 'common' | 'rare' | 'epic';
 
-export const SAVE_VERSION = 4;
+export const SAVE_VERSION = 7;
+
+export interface Deck {
+  id: string;
+  name: string;
+  cardIds: string[];
+}
 
 export interface GameState {
   version: number;
@@ -25,7 +31,8 @@ export interface GameState {
   battleEvents: BattleEvent[];
 
   collection: CardInstance[];
-  deckIds: string[];
+  decks: Deck[];
+  activeDeckId: string;
   spoils: CardInstance[];
   showInventory: boolean;
 
@@ -47,8 +54,16 @@ export function hasAbility(card: CardInstance, ability: AbilityId): boolean {
   return defHasAbility(card.defId, ability);
 }
 
-export function isInDeck(state: GameState, instanceId: string): boolean {
-  return state.deckIds.includes(instanceId);
+export function getActiveDeck(state: GameState): Deck {
+  return state.decks.find(d => d.id === state.activeDeckId) ?? state.decks[0];
+}
+
+export function getDeckIds(state: GameState): string[] {
+  return getActiveDeck(state).cardIds;
+}
+
+export function isInActiveDeck(state: GameState, instanceId: string): boolean {
+  return getDeckIds(state).includes(instanceId);
 }
 
 function instantiate(defId: CardId): CardInstance {
@@ -75,10 +90,26 @@ function shuffle<T>(arr: T[], rng: RNG): T[] {
   return a;
 }
 
+function newDeckId(): string {
+  return `deck-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+}
+
+// Всё, что было в колоде, перекладываем в руку
+function drawAllToHand(state: GameState): void {
+  const s = state.player;
+  s.hand.push(...s.deck);
+  s.deck = [];
+}
+
 // ---------- ИНИЦИАЛИЗАЦИЯ ----------
 
 export function createInitialState(seed?: number): GameState {
   const deck = STARTER_DECK.map(instantiate);
+  const firstDeck: Deck = {
+    id: newDeckId(),
+    name: 'Стартовая',
+    cardIds: deck.map(c => c.instanceId),
+  };
   const state: GameState = {
     version: SAVE_VERSION,
     rng: new RNG(seed),
@@ -91,7 +122,8 @@ export function createInitialState(seed?: number): GameState {
     log: ['Добро пожаловать.'],
     battleEvents: [],
     collection: [...deck],
-    deckIds: deck.map(c => c.instanceId),
+    decks: [firstDeck],
+    activeDeckId: firstDeck.id,
     spoils: [],
     showInventory: false,
     screen: 'menu',
@@ -100,22 +132,15 @@ export function createInitialState(seed?: number): GameState {
     inventoryFilter: 'all',
   };
   rebuildDeck(state);
-  drawUpTo(state, 'player', 3);
+  drawAllToHand(state);
   spawnEnemyWave(state);
   return state;
 }
 
 function rebuildDeck(state: GameState): void {
-  const inDeckIds = new Set(state.deckIds);
-  const deck = state.collection.filter(c => inDeckIds.has(c.instanceId));
-  state.player.deck = shuffle(deck, state.rng);
-}
-
-export function drawUpTo(state: GameState, side: 'player' | 'enemy', n: number): void {
-  const s = state[side];
-  while (s.hand.length < n && s.deck.length > 0) {
-    s.hand.push(s.deck.shift()!);
-  }
+  const ids = new Set(getDeckIds(state));
+  const cards = state.collection.filter(c => ids.has(c.instanceId));
+  state.player.deck = shuffle(cards, state.rng);
 }
 
 function spawnEnemyWave(state: GameState): void {
@@ -124,26 +149,57 @@ function spawnEnemyWave(state: GameState): void {
   if (state.turn > 6) pool.push('berserker');
   if (state.turn > 8) pool.push('dragon');
 
-  const count = Math.min(3, 1 + Math.floor(state.turn / 2));
+  const count = Math.min(MAX_FIELD_SIZE, 1 + Math.floor(state.turn / 2));
   state.enemy.field = [];
   for (let i = 0; i < count; i++) {
     state.enemy.field.push(instantiate(state.rng.pick(pool)));
   }
 }
 
-// ---------- ДЕЙСТВИЯ ----------
+// ---------- УПРАВЛЕНИЕ КОЛОДАМИ ----------
 
-export function placeCard(state: GameState, instanceId: string): boolean {
-  if (state.phase !== 'placing') return false;
-  if (state.player.field.length >= 3) return false;
-  const idx = state.player.hand.findIndex(c => c.instanceId === instanceId);
+export function createDeck(state: GameState, name?: string): Deck {
+  const deck: Deck = {
+    id: newDeckId(),
+    name: name ?? `Колода ${state.decks.length + 1}`,
+    cardIds: [],
+  };
+  state.decks.push(deck);
+  state.activeDeckId = deck.id;
+  return deck;
+}
+
+export function deleteDeck(state: GameState, deckId: string): boolean {
+  if (state.decks.length <= 1) return false;
+  const idx = state.decks.findIndex(d => d.id === deckId);
   if (idx === -1) return false;
-  const [card] = state.player.hand.splice(idx, 1);
-  state.player.field.push(card);
+  state.decks.splice(idx, 1);
+  if (state.activeDeckId === deckId) {
+    state.activeDeckId = state.decks[0].id;
+  }
+  refreshPlayerDeckIfSafe(state);
   return true;
 }
 
-// ---------- ДЕКА ----------
+export function renameDeck(state: GameState, deckId: string, name: string): boolean {
+  const deck = state.decks.find(d => d.id === deckId);
+  if (!deck) return false;
+  const trimmed = name.trim();
+  if (!trimmed) return false;
+  deck.name = trimmed.slice(0, 30);
+  return true;
+}
+
+export function setActiveDeck(state: GameState, deckId: string): boolean {
+  if (!state.decks.some(d => d.id === deckId)) return false;
+  state.activeDeckId = deckId;
+  refreshPlayerDeckIfSafe(state);
+  return true;
+}
+
+export function isDeckReady(state: GameState): boolean {
+  return getDeckIds(state).length >= MIN_DECK_SIZE;
+}
 
 export function toggleCardInDeck(state: GameState, instanceId: string): boolean {
   const safe = state.screen === 'menu' ||
@@ -153,24 +209,45 @@ export function toggleCardInDeck(state: GameState, instanceId: string): boolean 
   const inCollection = state.collection.some(c => c.instanceId === instanceId);
   if (!inCollection) return false;
 
-  const idx = state.deckIds.indexOf(instanceId);
+  const deck = getActiveDeck(state);
+  const idx = deck.cardIds.indexOf(instanceId);
+
   if (idx >= 0) {
-    if (state.deckIds.length <= MIN_DECK_SIZE) return false;
-    state.deckIds.splice(idx, 1);
+    if (deck.cardIds.length <= MIN_DECK_SIZE) return false;
+    deck.cardIds.splice(idx, 1);
   } else {
-    if (state.deckIds.length >= MAX_DECK_SIZE) return false;
-    state.deckIds.push(instanceId);
+    if (deck.cardIds.length >= MAX_DECK_SIZE) return false;
+    deck.cardIds.push(instanceId);
   }
 
-  if (state.screen === 'menu' || (state.phase === 'placing' && state.player.field.length === 0)) {
-    for (const c of state.player.hand) state.player.deck.push(c);
-    state.player.hand = [];
-    state.player.field = [];
-    rebuildDeck(state);
-    drawUpTo(state, 'player', 3);
-  }
+  refreshPlayerDeckIfSafe(state);
   return true;
 }
+
+function refreshPlayerDeckIfSafe(state: GameState): void {
+  const safe = state.screen === 'menu' ||
+    (state.phase === 'placing' && state.player.field.length === 0);
+  if (!safe) return;
+
+  state.player.hand = [];
+  state.player.field = [];
+  rebuildDeck(state);
+  drawAllToHand(state);
+}
+
+// ---------- ДЕЙСТВИЯ В БОЮ ----------
+
+export function placeCard(state: GameState, instanceId: string): boolean {
+  if (state.phase !== 'placing') return false;
+  if (state.player.field.length >= MAX_FIELD_SIZE) return false;
+  const idx = state.player.hand.findIndex(c => c.instanceId === instanceId);
+  if (idx === -1) return false;
+  const [card] = state.player.hand.splice(idx, 1);
+  state.player.field.push(card);
+  return true;
+}
+
+// ---------- СОРТИРОВКА / ФИЛЬТР ----------
 
 export function setInventorySort(state: GameState, sort: InventorySort): void {
   state.inventorySort = sort;
@@ -178,10 +255,6 @@ export function setInventorySort(state: GameState, sort: InventorySort): void {
 
 export function setInventoryFilter(state: GameState, filter: InventoryFilter): void {
   state.inventoryFilter = filter;
-}
-
-export function isDeckReady(state: GameState): boolean {
-  return state.deckIds.length >= MIN_DECK_SIZE;
 }
 
 // ---------- НАВИГАЦИЯ ----------
@@ -240,11 +313,14 @@ export function resolveBattle(state: GameState): void {
   if (playerDead.length > 0) {
     const deadIds = new Set(playerDead.map(c => c.instanceId));
     state.collection = state.collection.filter(c => !deadIds.has(c.instanceId));
-    state.deckIds = state.deckIds.filter(id => !deadIds.has(id));
+    for (const deck of state.decks) {
+      deck.cardIds = deck.cardIds.filter(id => !deadIds.has(id));
+    }
   }
 
+  // Трофеи копятся всё сражение
   if (enemyDead.length > 0) {
-    state.spoils = enemyDead.map(c => instantiate(c.defId));
+    state.spoils.push(...enemyDead.map(c => instantiate(c.defId)));
   }
 
   awardCrystals(state, playerDead);
@@ -255,15 +331,15 @@ export function resolveBattle(state: GameState): void {
     state.player.deck.length + state.player.hand.length + state.player.field.length;
 
   if (totalDeck === 0) {
-    state.phase = 'pack';
     state.packs++;
-    state.log.push('🎁 Все карты потеряны! Доступен пак.');
-    return;
-  }
+    state.log.push('🎁 Сражение окончено. Все карты потеряны — доступен пак!');
 
-  if (state.spoils.length > 0) {
-    state.phase = 'spoils';
-    state.log.push('🏆 Выберите трофей!');
+    if (state.spoils.length > 0) {
+      state.phase = 'spoils';
+      state.log.push(`🏆 Трофеи за сражение: ${state.spoils.length}. Выберите одну!`);
+    } else {
+      state.phase = 'pack';
+    }
     return;
   }
 
@@ -275,7 +351,7 @@ export function startNextRound(state: GameState): void {
   state.player.hand = [];
   rebuildDeck(state);
   state.phase = 'placing';
-  drawUpTo(state, 'player', 3);
+  drawAllToHand(state);
   spawnEnemyWave(state);
 }
 
@@ -462,19 +538,22 @@ export function takeSpoil(state: GameState, instanceId: string): void {
   if (idx === -1) return;
   const [card] = state.spoils.splice(idx, 1);
   state.collection.push(card);
-  if (state.deckIds.length < MAX_DECK_SIZE) {
-    state.deckIds.push(card.instanceId);
+
+  const deck = getActiveDeck(state);
+  if (deck.cardIds.length < MAX_DECK_SIZE) {
+    deck.cardIds.push(card.instanceId);
   }
+
   state.log.push(`🏆 Получено: ${CATALOG[card.defId].name}`);
   state.spoils = [];
-  startNextRound(state);
+  state.phase = 'pack';
 }
 
 export function skipSpoils(state: GameState): void {
   if (state.phase !== 'spoils') return;
   state.spoils = [];
   state.log.push('Трофеи пропущены.');
-  startNextRound(state);
+  state.phase = 'pack';
 }
 
 // ---------- ПАКИ ----------
@@ -482,14 +561,16 @@ export function skipSpoils(state: GameState): void {
 function rollPackCards(state: GameState): CardInstance[] {
   const pool = Object.values(CATALOG);
   const rolled: CardInstance[] = [];
+  const deck = getActiveDeck(state);
+
   for (let i = 0; i < 3; i++) {
     const rarity = rollRarity(state.rng, RARITY_WEIGHTS);
     const candidates = pool.filter(c => c.rarity === rarity);
     const def = state.rng.pick(candidates.length ? candidates : pool);
     const card = instantiate(def.id);
     state.collection.push(card);
-    if (state.deckIds.length < MAX_DECK_SIZE) {
-      state.deckIds.push(card.instanceId);
+    if (deck.cardIds.length < MAX_DECK_SIZE) {
+      deck.cardIds.push(card.instanceId);
     }
     rolled.push(card);
   }
@@ -506,7 +587,7 @@ export function openPack(state: GameState): void {
     startNextRound(state);
   } else if (state.screen === 'menu') {
     rebuildDeck(state);
-    drawUpTo(state, 'player', 3);
+    drawAllToHand(state);
   }
 }
 
@@ -518,7 +599,7 @@ export function buyPack(state: GameState): boolean {
 
   if (state.screen === 'menu') {
     rebuildDeck(state);
-    drawUpTo(state, 'player', 3);
+    drawAllToHand(state);
   }
   return true;
 }
@@ -534,7 +615,7 @@ function rollRarity(rng: RNG, weights: Record<string, number>): string {
   return entries[0][0];
 }
 
-// ---------- СОРТИРОВКА И ФИЛЬТР ----------
+// ---------- СОРТИРОВКА / ФИЛЬТР ----------
 
 const RARITY_ORDER: Record<string, number> = { common: 0, rare: 1, epic: 2 };
 
@@ -580,8 +661,7 @@ export function countByDefId(state: GameState, defId: CardId): number {
   return state.collection.filter(c => c.defId === defId).length;
 }
 
-export function countInDeckByDefId(state: GameState, defId: CardId): number {
-  return state.collection.filter(
-    c => c.defId === defId && state.deckIds.includes(c.instanceId)
-  ).length;
+export function countInActiveDeckByDefId(state: GameState, defId: CardId): number {
+  const ids = new Set(getDeckIds(state));
+  return state.collection.filter(c => c.defId === defId && ids.has(c.instanceId)).length;
 }

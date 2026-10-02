@@ -29,6 +29,26 @@ const ui: AppUi = {
 let state: G.GameState | null = null;
 let isAnimating = false;
 
+// ============================================================
+// Настройки анимации
+// ============================================================
+
+const ANIM = {
+  beforeBattle:  500,
+  afterBattle:   700,
+  preAttack:      80,
+  preDeath:      150,
+  duration: {
+    attack:      550,
+    splash:      400,
+    death:       650,
+    poisonTick:  450,
+    shield:      350,
+    heal:        400,
+    poison:      350,
+  },
+} as const;
+
 function bootstrap() {
   const nick = Auth.getSession();
   if (!nick) return;
@@ -221,6 +241,12 @@ function renderTopBar(): HTMLElement {
   nick.textContent = `👤 ${ui.currentUser ?? '—'}`;
   bar.appendChild(nick);
 
+  const deckLabel = document.createElement('span');
+  deckLabel.className = 'deck-label';
+  const active = G.getActiveDeck(state!);
+  deckLabel.textContent = `🎴 ${active.name} (${active.cardIds.length}/${MAX_DECK_SIZE})`;
+  bar.appendChild(deckLabel);
+
   const crystals = document.createElement('span');
   crystals.className = 'crystals';
   crystals.textContent = `💎 ${state!.crystals}`;
@@ -288,8 +314,9 @@ function renderMenu() {
 }
 
 function renderBattleTab(root: HTMLElement) {
+  const active = G.getActiveDeck(state!);
   const deckReady = G.isDeckReady(state!);
-  const deckSize = state!.deckIds.length;
+  const deckSize = active.cardIds.length;
 
   const panel = document.createElement('div');
   panel.className = 'menu-panel';
@@ -298,7 +325,8 @@ function renderBattleTab(root: HTMLElement) {
     <p>Сразись с волной противников. Карты, потерянные в бою, исчезают навсегда.
     Победа: 💎 +1. Победа без потерь: 💎 +3.</p>
     <div class="stats-row">
-      <span>🎴 Дека: <b class="${deckReady ? 'ok' : 'bad'}">${deckSize} / ${MAX_DECK_SIZE}</b>
+      <span>🎴 Колода: <b>${active.name}</b></span>
+      <span>Размер: <b class="${deckReady ? 'ok' : 'bad'}">${deckSize} / ${MAX_DECK_SIZE}</b>
             <small>(мин. ${MIN_DECK_SIZE})</small></span>
       <span>📦 Коллекция: ${state!.collection.length}</span>
       <span>🪦 Потеряно: ${state!.player.lost.length}</span>
@@ -311,14 +339,14 @@ function renderBattleTab(root: HTMLElement) {
 
   const btn = document.createElement('button');
   btn.className = 'primary-btn';
-  btn.textContent = deckReady ? '⚔️ Начать бой' : `⚠️ Собери деку (${deckSize}/${MIN_DECK_SIZE})`;
+  btn.textContent = deckReady ? '⚔️ Начать бой' : `⚠️ Добавь карту (${deckSize}/${MIN_DECK_SIZE})`;
   btn.disabled = !deckReady;
   btn.onclick = () => { G.goToBattle(state!); render(); };
   btnRow.appendChild(btn);
 
   const toInv = document.createElement('button');
   toInv.className = 'btn-secondary';
-  toInv.textContent = '📦 Собрать деку';
+  toInv.textContent = '📦 Колоды';
   toInv.onclick = () => { G.setMenuTab(state!, 'inventory'); render(); };
   btnRow.appendChild(toInv);
 
@@ -406,19 +434,88 @@ function renderPacksTab(root: HTMLElement) {
 }
 
 // ============================================================
-// Инвентарь
+// Инвентарь + управление колодами
 // ============================================================
+
+function deckSelector(): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'deck-selector';
+
+  const label = document.createElement('span');
+  label.className = 'ctrl-label';
+  label.textContent = 'Колода:';
+  wrap.appendChild(label);
+
+  const chips = document.createElement('div');
+  chips.className = 'deck-chips';
+  state!.decks.forEach(deck => {
+    const chip = document.createElement('button');
+    chip.className = `deck-chip ${deck.id === state!.activeDeckId ? 'active' : ''}`;
+    chip.textContent = `${deck.name} (${deck.cardIds.length})`;
+    chip.onclick = () => {
+      G.setActiveDeck(state!, deck.id);
+      render();
+    };
+    chips.appendChild(chip);
+  });
+  wrap.appendChild(chips);
+
+  const actions = document.createElement('div');
+  actions.className = 'deck-actions';
+
+  const addBtn = document.createElement('button');
+  addBtn.className = 'chip';
+  addBtn.textContent = '+ Новая';
+  addBtn.onclick = () => {
+    const name = prompt('Название новой колоды:', `Колода ${state!.decks.length + 1}`);
+    if (name === null) return;
+    G.createDeck(state!, name || undefined);
+    render();
+  };
+  actions.appendChild(addBtn);
+
+  const renameBtn = document.createElement('button');
+  renameBtn.className = 'chip';
+  renameBtn.textContent = '✎ Переименовать';
+  renameBtn.onclick = () => {
+    const active = G.getActiveDeck(state!);
+    const name = prompt('Новое название:', active.name);
+    if (name === null) return;
+    G.renameDeck(state!, active.id, name);
+    render();
+  };
+  actions.appendChild(renameBtn);
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'chip danger';
+  delBtn.textContent = '🗑 Удалить';
+  delBtn.disabled = state!.decks.length <= 1;
+  delBtn.onclick = () => {
+    const active = G.getActiveDeck(state!);
+    if (!confirm(`Удалить колоду «${active.name}»?`)) return;
+    G.deleteDeck(state!, active.id);
+    render();
+  };
+  actions.appendChild(delBtn);
+
+  wrap.appendChild(actions);
+  return wrap;
+}
 
 function inventoryContent(): HTMLElement {
   const wrap = document.createElement('div');
 
+  wrap.appendChild(deckSelector());
+
+  const active = G.getActiveDeck(state!);
+  const inDeck = active.cardIds.length;
+  const ready = G.isDeckReady(state!);
+
   const deckInfo = document.createElement('div');
   deckInfo.className = 'deck-info';
-  const inDeck = state!.deckIds.length;
-  const ready = G.isDeckReady(state!);
   deckInfo.innerHTML = `
-    🎴 В боевой деке: <b class="${ready ? 'ok' : 'bad'}">${inDeck} / ${MAX_DECK_SIZE}</b>
-    <small>(минимум ${MIN_DECK_SIZE})</small>
+    🎴 В колоде «${active.name}»: <b class="${ready ? 'ok' : 'bad'}">${inDeck} / ${MAX_DECK_SIZE}</b>
+    <small>(минимум ${MIN_DECK_SIZE}, максимум ${MAX_DECK_SIZE})</small>
     &nbsp;·&nbsp; клик по карте — добавить/убрать
   `;
   wrap.appendChild(deckInfo);
@@ -482,7 +579,7 @@ function inventoryContent(): HTMLElement {
   } else {
     visible.forEach(sample => {
       const count = G.countByDefId(state!, sample.defId);
-      const inDeckCount = G.countInDeckByDefId(state!, sample.defId);
+      const inDeckCount = G.countInActiveDeckByDefId(state!, sample.defId);
       const allInDeck = inDeckCount === count && count > 0;
       const someInDeck = inDeckCount > 0 && inDeckCount < count;
 
@@ -493,8 +590,8 @@ function inventoryContent(): HTMLElement {
         deckToggle: () => {
           const copies = state!.collection.filter(c => c.defId === sample.defId);
           const target = allInDeck
-            ? copies.find(c => G.isInDeck(state!, c.instanceId))
-            : copies.find(c => !G.isInDeck(state!, c.instanceId));
+            ? copies.find(c => G.isInActiveDeck(state!, c.instanceId))
+            : copies.find(c => !G.isInActiveDeck(state!, c.instanceId));
           if (!target) return;
           G.toggleCardInDeck(state!, target.instanceId);
           render();
@@ -540,13 +637,13 @@ function sleep(ms: number): Promise<void> {
 
 function eventDuration(ev: BattleEvent): number {
   switch (ev.type) {
-    case 'attack':     return 220;
-    case 'splash':     return 140;
-    case 'death':      return 320;
-    case 'poisonTick': return 160;
-    case 'shield':     return 120;
-    case 'heal':       return 140;
-    case 'poison':     return 120;
+    case 'attack':     return ANIM.duration.attack;
+    case 'splash':     return ANIM.duration.splash;
+    case 'death':      return ANIM.duration.death;
+    case 'poisonTick': return ANIM.duration.poisonTick;
+    case 'shield':     return ANIM.duration.shield;
+    case 'heal':       return ANIM.duration.heal;
+    case 'poison':     return ANIM.duration.poison;
   }
 }
 
@@ -562,24 +659,24 @@ function flashEvent(ev: BattleEvent): void {
       setTimeout(() => {
         getCardEl(ev.attackerId)?.classList.remove('attacking');
         getCardEl(ev.defenderId)?.classList.remove('hit');
-      }, 300);
+      }, 400);
       break;
     case 'splash':
       getCardEl(ev.targetId)?.classList.add('hit');
-      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('hit'), 250);
+      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('hit'), 350);
       break;
     case 'heal':
       getCardEl(ev.targetId)?.classList.add('healed');
-      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('healed'), 300);
+      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('healed'), 400);
       break;
     case 'shield':
       getCardEl(ev.targetId)?.classList.add('shielded');
-      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('shielded'), 250);
+      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('shielded'), 350);
       break;
     case 'poison':
     case 'poisonTick':
       getCardEl(ev.targetId)?.classList.add('poisoned');
-      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('poisoned'), 250);
+      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('poisoned'), 350);
       break;
     case 'death':
       getCardEl(ev.cardId)?.classList.add('dying');
@@ -626,39 +723,108 @@ function applyEventToField(player: CardInstance[], enemy: CardInstance[], ev: Ba
   }
 }
 
+function getCardById(id: string): CardInstance | undefined {
+  if (!state) return undefined;
+  return [...state.player.field, ...state.enemy.field].find(c => c.instanceId === id);
+}
+
+function updateCardDom(id: string, card: CardInstance | undefined): void {
+  if (!card) return;
+  const el = getCardEl(id);
+  if (!el) return;
+
+  const def = CATALOG[card.defId];
+
+  const hpText = el.querySelector('.hp');
+  if (hpText) hpText.textContent = `❤ ${Math.max(0, card.currentHp)}/${def.health}`;
+
+  const hpBarInner = el.querySelector<HTMLElement>('.hpbar > div');
+  if (hpBarInner) {
+    const pct = Math.max(0, card.currentHp) / def.health;
+    hpBarInner.style.width = `${pct * 100}%`;
+  }
+
+  let shieldBadge = el.querySelector<HTMLElement>('.badge.shield');
+  if (card.shield > 0) {
+    if (!shieldBadge) {
+      shieldBadge = document.createElement('div');
+      shieldBadge.className = 'badge shield';
+      el.appendChild(shieldBadge);
+    }
+    shieldBadge.textContent = `🛡 ${card.shield}`;
+  } else if (shieldBadge) {
+    shieldBadge.remove();
+  }
+
+  let poisonBadge = el.querySelector<HTMLElement>('.badge.poison');
+  if (card.poison > 0) {
+    if (!poisonBadge) {
+      poisonBadge = document.createElement('div');
+      poisonBadge.className = 'badge poison';
+      el.appendChild(poisonBadge);
+    }
+    poisonBadge.textContent = `☠ ${card.poison}`;
+  } else if (poisonBadge) {
+    poisonBadge.remove();
+  }
+}
+
+function removeCardDom(id: string): void {
+  const el = getCardEl(id);
+  if (!el) return;
+  setTimeout(() => el.remove(), ANIM.duration.death);
+}
+
 async function animateBattle(): Promise<void> {
   if (!state || isAnimating) return;
   if (state.phase !== 'placing' || state.player.field.length === 0) return;
 
   isAnimating = true;
 
-  // Снимок «до боя»
   const displayPlayer = state.player.field.map(c => ({ ...c }));
   const displayEnemy  = state.enemy.field.map(c => ({ ...c }));
 
-  // Прогон боя — state мутируется
   G.resolveBattle(state);
   const events = state.battleEvents.slice();
   const postPlayer = state.player.field;
   const postEnemy  = state.enemy.field;
 
-  // Показываем «до боя»
   state.player.field = displayPlayer;
   state.enemy.field  = displayEnemy;
   render();
-  await sleep(250);
+  await sleep(ANIM.beforeBattle);
 
-  // Проигрываем события
   for (const ev of events) {
+    if (ev.type === 'death')  await sleep(ANIM.preDeath);
+    if (ev.type === 'attack') await sleep(ANIM.preAttack);
+
     flashEvent(ev);
     applyEventToField(state.player.field, state.enemy.field, ev);
-    render();
+
+    switch (ev.type) {
+      case 'attack':
+        updateCardDom(ev.defenderId, getCardById(ev.defenderId));
+        break;
+      case 'splash':
+      case 'poisonTick':
+      case 'heal':
+      case 'shield':
+      case 'poison':
+        updateCardDom(ev.targetId, getCardById(ev.targetId));
+        break;
+      case 'death':
+        removeCardDom(ev.cardId);
+        break;
+    }
+
     await sleep(eventDuration(ev));
   }
 
-  // Возвращаем финальные поля
   state.player.field = postPlayer;
   state.enemy.field  = postEnemy;
+
+  await sleep(ANIM.afterBattle);
+
   isAnimating = false;
   render();
 }
@@ -675,7 +841,6 @@ function renderBattleScreen() {
 
   const stats = [
     `🌀 Ход ${state!.turn}`,
-    `🎴 Дека: ${state!.deckIds.length}`,
     `📚 Осталось: ${state!.player.deck.length}`,
     `✋ Рука: ${state!.player.hand.length}`,
     `🪦 Потеряно: ${state!.player.lost.length}`,
@@ -715,10 +880,16 @@ function renderBattleScreen() {
 
   const controls = document.createElement('div');
   controls.className = 'controls';
-  if (state!.phase === 'placing') {
+
+  if (isAnimating) {
     const btn = document.createElement('button');
-    btn.textContent = isAnimating ? '⚔️ Бой...' : '⚔️ В бой';
-    btn.disabled = state!.player.field.length === 0 || isAnimating;
+    btn.textContent = '⚔️ Бой...';
+    btn.disabled = true;
+    controls.appendChild(btn);
+  } else if (state!.phase === 'placing') {
+    const btn = document.createElement('button');
+    btn.textContent = '⚔️ В бой';
+    btn.disabled = state!.player.field.length === 0;
     btn.onclick = () => { animateBattle(); };
     controls.appendChild(btn);
   } else if (state!.phase === 'pack') {
@@ -739,8 +910,10 @@ function renderBattleScreen() {
   });
   app.appendChild(log);
 
-  if (state!.phase === 'spoils') renderSpoilsOverlay();
-  if (state!.showInventory)     renderInventoryOverlay();
+  if (!isAnimating) {
+    if (state!.phase === 'spoils') renderSpoilsOverlay();
+    if (state!.showInventory)     renderInventoryOverlay();
+  }
 }
 
 function renderSpoilsOverlay() {
