@@ -5,12 +5,12 @@ import {
   MIN_DECK_SIZE, MAX_DECK_SIZE,
 } from './cards';
 import { RNG } from './rng';
-import type { AbilityId, CardId, CardInstance, MenuTab, Phase, Screen, Side } from './types';
+import type { AbilityId, BattleEvent, CardId, CardInstance, MenuTab, Phase, Screen, Side } from './types';
 
 export type InventorySort = 'default' | 'name' | 'attack' | 'health' | 'rarity';
 export type InventoryFilter = 'all' | 'common' | 'rare' | 'epic';
 
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 export interface GameState {
   version: number;
@@ -22,6 +22,7 @@ export interface GameState {
   packs: number;
   crystals: number;
   log: string[];
+  battleEvents: BattleEvent[];
 
   collection: CardInstance[];
   deckIds: string[];
@@ -88,6 +89,7 @@ export function createInitialState(seed?: number): GameState {
     packs: 1,
     crystals: 0,
     log: ['Добро пожаловать.'],
+    battleEvents: [],
     collection: [...deck],
     deckIds: deck.map(c => c.instanceId),
     spoils: [],
@@ -144,7 +146,6 @@ export function placeCard(state: GameState, instanceId: string): boolean {
 // ---------- ДЕКА ----------
 
 export function toggleCardInDeck(state: GameState, instanceId: string): boolean {
-  // Менять деку можно только вне боя или в начале раунда (пока ничего не выложено)
   const safe = state.screen === 'menu' ||
     (state.phase === 'placing' && state.player.field.length === 0);
   if (!safe) return false;
@@ -161,9 +162,7 @@ export function toggleCardInDeck(state: GameState, instanceId: string): boolean 
     state.deckIds.push(instanceId);
   }
 
-  // Если мы в меню или в начале раунда — обновляем деку сразу
   if (state.screen === 'menu' || (state.phase === 'placing' && state.player.field.length === 0)) {
-    // вернуть руку в пул
     for (const c of state.player.hand) state.player.deck.push(c);
     state.player.hand = [];
     state.player.field = [];
@@ -212,15 +211,16 @@ export function resolveBattle(state: GameState): void {
   if (state.phase !== 'placing' || state.player.field.length === 0) return;
   state.phase = 'battle';
   state.log = [];
+  state.battleEvents = [];
 
-  tickStartOfTurn(state.player.field, state.log, 'Ваш');
-  tickStartOfTurn(state.enemy.field,  state.log, 'Вражеский');
+  tickStartOfTurn(state.player.field, state.log, 'Ваш', state.battleEvents);
+  tickStartOfTurn(state.enemy.field,  state.log, 'Вражеский', state.battleEvents);
 
   const playerDead: CardInstance[] = [];
   const enemyDead:  CardInstance[] = [];
 
-  playerDead.push(...cleanupField(state.player, state.log, true));
-  enemyDead.push(...cleanupField(state.enemy,  state.log, false));
+  playerDead.push(...cleanupField(state.player, state.log, true, state.battleEvents));
+  enemyDead.push(...cleanupField(state.enemy,  state.log, false, state.battleEvents));
 
   const p = state.player.field;
   const e = state.enemy.field;
@@ -234,8 +234,8 @@ export function resolveBattle(state: GameState): void {
     }
   }
 
-  playerDead.push(...cleanupField(state.player, state.log, true));
-  enemyDead.push(...cleanupField(state.enemy,  state.log, false));
+  playerDead.push(...cleanupField(state.player, state.log, true, state.battleEvents));
+  enemyDead.push(...cleanupField(state.enemy,  state.log, false, state.battleEvents));
 
   if (playerDead.length > 0) {
     const deadIds = new Set(playerDead.map(c => c.instanceId));
@@ -296,7 +296,7 @@ function awardCrystals(state: GameState, playerDead: CardInstance[]): void {
   }
 }
 
-function tickStartOfTurn(field: CardInstance[], log: string[], owner: string): void {
+function tickStartOfTurn(field: CardInstance[], log: string[], owner: string, events: BattleEvent[]): void {
   for (const card of field) {
     if (card.currentHp <= 0) continue;
     const def = CATALOG[card.defId];
@@ -305,17 +305,19 @@ function tickStartOfTurn(field: CardInstance[], log: string[], owner: string): v
       const healed = Math.min(REGEN_AMOUNT, def.health - card.currentHp);
       card.currentHp += healed;
       log.push(`💚 ${owner} ${def.name} +${healed} HP`);
+      events.push({ type: 'heal', targetId: card.instanceId, amount: healed });
     }
 
     if (card.poison > 0) {
       card.currentHp -= card.poison;
       log.push(`☠️ ${owner} ${def.name} получает ${card.poison} от яда`);
+      events.push({ type: 'poisonTick', targetId: card.instanceId, damage: card.poison });
       card.poison--;
     }
   }
 }
 
-function cleanupField(side: Side, log: string[], isPlayer: boolean): CardInstance[] {
+function cleanupField(side: Side, log: string[], isPlayer: boolean, events: BattleEvent[]): CardInstance[] {
   const dead: CardInstance[] = [];
   side.field = side.field.filter(c => {
     if (c.currentHp <= 0) {
@@ -324,6 +326,11 @@ function cleanupField(side: Side, log: string[], isPlayer: boolean): CardInstanc
         side.lost.push(c);
         log.push(`💀 ${CATALOG[c.defId].name} потерян навсегда`);
       }
+      events.push({
+        type: 'death',
+        cardId: c.instanceId,
+        side: isPlayer ? 'player' : 'enemy',
+      });
       return false;
     }
     return true;
@@ -387,22 +394,35 @@ function strikeOnce(
     const absorbed = Math.min(defender.shield, dmg);
     defender.shield -= absorbed;
     dmg -= absorbed;
-    if (absorbed > 0) state.log.push(`🛡️ ${dDef.name} поглощает ${absorbed}`);
+    if (absorbed > 0) {
+      state.log.push(`🛡️ ${dDef.name} поглощает ${absorbed}`);
+      state.battleEvents.push({ type: 'shield', targetId: defender.instanceId, absorbed });
+    }
   }
 
   defender.currentHp -= dmg;
 
+  state.battleEvents.push({
+    type: 'attack',
+    attackerId: attacker.instanceId,
+    defenderId: defender.instanceId,
+    damage: dmg,
+  });
+
   if (hasAbility(attacker, 'lifesteal') && dmg > 0) {
     const before = attacker.currentHp;
     attacker.currentHp = Math.min(attacker.currentHp + dmg, aDef.health);
-    if (attacker.currentHp > before) {
-      state.log.push(`🩸 ${aDef.name} +${attacker.currentHp - before} HP`);
+    const healed = attacker.currentHp - before;
+    if (healed > 0) {
+      state.log.push(`🩸 ${aDef.name} +${healed} HP`);
+      state.battleEvents.push({ type: 'heal', targetId: attacker.instanceId, amount: healed });
     }
   }
 
   if (hasAbility(attacker, 'poison') && defender.currentHp > 0) {
     defender.poison += 1;
     state.log.push(`☠️ ${dDef.name} отравлен (${defender.poison})`);
+    state.battleEvents.push({ type: 'poison', targetId: defender.instanceId, stacks: defender.poison });
   }
 }
 
@@ -422,9 +442,15 @@ function splashAround(
       const absorbed = Math.min(neighbor.shield, d);
       neighbor.shield -= absorbed;
       d -= absorbed;
+      if (absorbed > 0) {
+        state.battleEvents.push({ type: 'shield', targetId: neighbor.instanceId, absorbed });
+      }
     }
     neighbor.currentHp -= d;
     state.log.push(`${prefix} ${CATALOG[neighbor.defId].name} (${d})`);
+    if (d > 0) {
+      state.battleEvents.push({ type: 'splash', targetId: neighbor.instanceId, damage: d });
+    }
   }
 }
 

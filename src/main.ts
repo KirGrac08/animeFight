@@ -48,6 +48,7 @@ function cardEl(card: CardInstance, opts: CardOpts = {}): HTMLElement {
   const def = CATALOG[card.defId];
   const el = document.createElement('div');
   el.className = `card ${def.rarity}`;
+  el.dataset.cardId = card.instanceId;
   if (opts.inDeck) el.classList.add('in-deck');
   if (opts.partialDeck) el.classList.add('partially-in-deck');
 
@@ -528,140 +529,7 @@ function inventoryContent(): HTMLElement {
 // Бой
 // ============================================================
 
-function renderBattleScreen() {
-  app.appendChild(renderTopBar());
-
-  const header = document.createElement('div');
-  header.className = 'header';
-
-  const stats = [
-    `🌀 Ход ${state!.turn}`,
-    `🎴 Дека: ${state!.deckIds.length}`,
-    `📚 Осталось: ${state!.player.deck.length}`,
-    `✋ Рука: ${state!.player.hand.length}`,
-    `🪦 Потеряно: ${state!.player.lost.length}`,
-    `💎 ${state!.crystals}`,
-  ];
-  stats.forEach(s => {
-    const span = document.createElement('span');
-    span.textContent = s;
-    header.appendChild(span);
-  });
-
-  const invBtn = document.createElement('button');
-  invBtn.className = 'icon-btn';
-  invBtn.textContent = `📦 (${state!.collection.length})`;
-  invBtn.onclick = () => { G.toggleInventory(state!); render(); };
-  header.appendChild(invBtn);
-
-  const menuBtn = document.createElement('button');
-  menuBtn.className = 'icon-btn';
-  menuBtn.textContent = '☰ Меню';
-  menuBtn.onclick = () => { G.goToMenu(state!); render(); };
-  header.appendChild(menuBtn);
-
-  app.appendChild(header);
-
-  app.appendChild(row('Враг', state!.enemy.field));
-  app.appendChild(row('Ваше поле', state!.player.field));
-
-  const handRow = row('Рука', state!.player.hand, (c) => {
-    if (G.placeCard(state!, c.instanceId)) render();
-  });
-  handRow.classList.add('hand');
-  app.appendChild(handRow);
-
-  const controls = document.createElement('div');
-  controls.className = 'controls';
-  if (state!.phase === 'placing') {
-    const btn = document.createElement('button');
-    btn.textContent = '⚔️ В бой';
-    btn.disabled = state!.player.field.length === 0;
-    btn.onclick = () => { G.resolveBattle(state!); render(); };
-    controls.appendChild(btn);
-  } else if (state!.phase === 'pack') {
-    const btn = document.createElement('button');
-    btn.className = 'pack';
-    btn.textContent = '🎁 Открыть пак';
-    btn.onclick = () => { G.openPack(state!); render(); };
-    controls.appendChild(btn);
-  }
-  app.appendChild(controls);
-
-  const log = document.createElement('div');
-  log.className = 'log';
-  state!.log.forEach(l => {
-    const line = document.createElement('div');
-    line.textContent = l;
-    log.appendChild(line);
-  });
-  app.appendChild(log);
-
-  if (state!.phase === 'spoils') renderSpoilsOverlay();
-  if (state!.showInventory)     renderInventoryOverlay();
-}
-
-function renderSpoilsOverlay() {
-  const overlay = document.createElement('div');
-  overlay.className = 'spoils-overlay';
-
-  const title = document.createElement('div');
-  title.className = 'spoils-title';
-  title.textContent = '🏆 Трофеи боя';
-  overlay.appendChild(title);
-
-  const hint = document.createElement('div');
-  hint.className = 'spoils-hint';
-  hint.textContent = 'Выберите одну карту, чтобы забрать её в коллекцию';
-  overlay.appendChild(hint);
-
-  const cards = document.createElement('div');
-  cards.className = 'spoils-cards';
-  state!.spoils.forEach(c => {
-    cards.appendChild(cardEl(c, {
-      onClick: () => {
-        G.takeSpoil(state!, c.instanceId);
-        render();
-      },
-    }));
-  });
-  overlay.appendChild(cards);
-
-  const skip = document.createElement('button');
-  skip.className = 'btn-secondary';
-  skip.textContent = 'Пропустить';
-  skip.onclick = () => { G.skipSpoils(state!); render(); };
-  overlay.appendChild(skip);
-
-  app.appendChild(overlay);
-}
-
-function renderInventoryOverlay() {
-  const overlay = document.createElement('div');
-  overlay.className = 'overlay';
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) { G.toggleInventory(state!); render(); }
-  });
-
-  const panel = document.createElement('div');
-  panel.className = 'inventory-panel';
-
-  const header = document.createElement('div');
-  header.className = 'inventory-header';
-  const h2 = document.createElement('h2');
-  h2.textContent = '📦 Коллекция';
-  header.appendChild(h2);
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'btn-secondary';
-  closeBtn.textContent = '✕ Закрыть';
-  closeBtn.onclick = () => { G.toggleInventory(state!); render(); };
-  header.appendChild(closeBtn);
-  panel.appendChild(header);
-
-  panel.appendChild(inventoryContent());
-  overlay.appendChild(panel);
-  app.appendChild(overlay);
-}
+renderBattleScreen
 
 // ============================================================
 // Главный рендер
