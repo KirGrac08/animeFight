@@ -52,6 +52,7 @@ const ANIM = {
     heal:        400,
     poison:      350,
     witchAura:   220,
+    freeze:      300,
   },
 } as const;
 
@@ -105,6 +106,7 @@ function cardEl(card: CardInstance, opts: CardOpts = {}): HTMLElement {
   let badges = '';
   if (card.shield > 0) badges += `<div class="badge shield">🛡 ${card.shield}</div>`;
   if (card.poison > 0) badges += `<div class="badge poison">☠ ${card.poison}</div>`;
+  if (card.frozen > 0) badges += `<div class="badge frozen">❄️</div>`;
 
   el.innerHTML = `
     <div class="type-badge">${typeIcon}</div>
@@ -638,7 +640,6 @@ function inventoryContent(): HTMLElement {
   colGrid.className = 'inventory-grid';
 
   if (mergeMode) {
-    // === РЕЖИМ ОБЪЕДИНЕНИЯ ===
     const allCards = G.sortedFilteredAllCards(state!);
 
     if (allCards.length === 0) {
@@ -654,7 +655,6 @@ function inventoryContent(): HTMLElement {
         el.dataset.merge = '1';
         if (isSelected) el.classList.add('merge-selected');
 
-        // Если уже выбрана одна карта — несовместимые гасим
         if (mergeSelected.length === 1 && !isSelected) {
           const firstId = mergeSelected[0];
           const c1 = state!.collection.find(c => c.instanceId === firstId);
@@ -668,7 +668,6 @@ function inventoryContent(): HTMLElement {
         colGrid.appendChild(el);
       });
 
-      // Один обработчик на всю сетку — без дублей
       colGrid.onclick = (e) => {
         const target = (e.target as HTMLElement).closest('.card[data-merge]') as HTMLElement | null;
         if (!target) return;
@@ -678,7 +677,6 @@ function inventoryContent(): HTMLElement {
         const id = target.dataset.cardId;
         if (!id || !state) return;
 
-        // Клик по уже выбранной — снять выбор
         const idx = mergeSelected.indexOf(id);
         if (idx >= 0) {
           mergeSelected.splice(idx, 1);
@@ -686,20 +684,16 @@ function inventoryContent(): HTMLElement {
           return;
         }
 
-        // Уже 2 — игнор
         if (mergeSelected.length >= 2) return;
 
-        // Клик по первой
         if (mergeSelected.length === 0) {
           mergeSelected = [id];
           render();
           return;
         }
 
-        // Клик по второй — проверяем совместимость
         const check = G.canMerge(state, mergeSelected[0], id);
         if (!check.ok) {
-          // Несовместима — заменяем выбор этой картой
           mergeSelected = [id];
           render();
           return;
@@ -710,7 +704,6 @@ function inventoryContent(): HTMLElement {
       };
     }
   } else {
-    // === ОБЫЧНЫЙ РЕЖИМ ===
     const visible = G.sortAndFilterCollection(state!);
 
     if (visible.length === 0) {
@@ -1074,6 +1067,7 @@ function eventDuration(ev: BattleEvent): number {
     case 'heal':       return ANIM.duration.heal;
     case 'poison':     return ANIM.duration.poison;
     case 'witchAura':  return ANIM.duration.witchAura;
+    case 'freeze':     return ANIM.duration.freeze;
   }
 }
 
@@ -1108,6 +1102,10 @@ function flashEvent(ev: BattleEvent): void {
     case 'witchAura':
       getCardEl(ev.targetId)?.classList.add('poisoned');
       setTimeout(() => getCardEl(ev.targetId)?.classList.remove('poisoned'), 350);
+      break;
+    case 'freeze':
+      getCardEl(ev.targetId)?.classList.add('frozen');
+      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('frozen'), 500);
       break;
     case 'death':
       getCardEl(ev.cardId)?.classList.add('dying');
@@ -1158,6 +1156,11 @@ function applyEventToField(
     case 'poison': {
       const target = find(ev.targetId);
       if (target) target.poison = ev.stacks;
+      break;
+    }
+    case 'freeze': {
+      const target = find(ev.targetId);
+      if (target) target.frozen = 1;
       break;
     }
     case 'death': {
@@ -1215,6 +1218,18 @@ function updateCardDom(id: string, card: CardInstance | undefined): void {
   } else if (poisonBadge) {
     poisonBadge.remove();
   }
+
+  let frozenBadge = el.querySelector<HTMLElement>('.badge.frozen');
+  if (card.frozen > 0) {
+    if (!frozenBadge) {
+      frozenBadge = document.createElement('div');
+      frozenBadge.className = 'badge frozen';
+      el.appendChild(frozenBadge);
+    }
+    frozenBadge.textContent = '❄️';
+  } else if (frozenBadge) {
+    frozenBadge.remove();
+  }
 }
 
 function removeCardDom(id: string): void {
@@ -1269,6 +1284,7 @@ async function animateBattle(): Promise<void> {
       case 'shield':
       case 'poison':
       case 'witchAura':
+      case 'freeze':
         updateCardDom(ev.targetId, getCardById(ev.targetId));
         break;
       case 'death':

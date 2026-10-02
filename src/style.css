@@ -1449,3 +1449,36 @@ button {
         border-color: #5a2a2a;
         box-shadow: none;
     }
+
+/* ===== Значок заморозки ===== */
+
+.card .badge.frozen {
+    bottom: 6px;
+    left: 6px;
+    top: auto;
+    font-size: 12px;
+    padding: 1px 4px;
+    background: rgba(80, 160, 220, .85);
+    color: #e8f4ff;
+    text-shadow: 0 0 6px rgba(126, 200, 255, .9);
+    box-shadow: 0 0 10px rgba(126, 200, 255, .6);
+}
+
+@keyframes cardFrozen {
+    0% {
+        box-shadow: 0 0 0 rgba(126,200,255,0);
+    }
+
+    50% {
+        box-shadow: 0 0 28px rgba(126,200,255,.95);
+        border-color: #7ec8ff !important;
+    }
+
+    100% {
+        box-shadow: 0 0 0 rgba(126,200,255,0);
+    }
+}
+
+.card.frozen {
+    animation: cardFrozen .5s ease;
+}

@@ -10,7 +10,13 @@ export type AbilityId =
   | 'regen'
   | 'shield'
   | 'splash'
-  | 'witch';
+  | 'witch'
+  | 'taunt'
+  | 'battlecry'
+  | 'deathrattle'
+  | 'freeze'
+  | 'pierce'
+  | 'heal_aura';
 
 export interface CardDef {
   id: CardId;
@@ -29,6 +35,7 @@ export interface CardInstance {
   currentHp: number;
   shield: number;
   poison: number;
+  frozen: number;        // сколько атак пропустит
 }
 
 export interface Side {
@@ -45,6 +52,7 @@ export type BattleEvent =
   | { type: 'poison';     targetId: string; stacks: number }
   | { type: 'poisonTick'; targetId: string; damage: number }
   | { type: 'witchAura';  targetId: string; damage: number }
+  | { type: 'freeze';     targetId: string }
   | { type: 'death';      cardId: string; side: 'player' | 'enemy' };
 
 export type Phase = 'placing' | 'battle' | 'pack' | 'spoils';

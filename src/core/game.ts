@@ -4,6 +4,7 @@ import {
   PACK_PRICE, REWARD_WIN, REWARD_FLAWLESS,
   MIN_DECK_SIZE, MAX_DECK_SIZE,
   FIELD_COLS, FIELD_SLOTS, WITCH_POISON_CHANCE,
+  HEAL_AURA_AMOUNT, BATTLECRY_DAMAGE,
 } from './cards';
 import { RNG } from './rng';
 import type { AbilityId, BattleEvent, CardId, CardInstance, MenuTab, Phase, Screen, Side } from './types';
@@ -11,7 +12,7 @@ import type { AbilityId, BattleEvent, CardId, CardInstance, MenuTab, Phase, Scre
 export type InventorySort = 'default' | 'name' | 'attack' | 'health' | 'rarity';
 export type InventoryFilter = 'all' | 'common' | 'rare' | 'epic';
 
-export const SAVE_VERSION = 14;
+export const SAVE_VERSION = 15;
 
 export interface Deck {
   id: string;
@@ -43,8 +44,6 @@ export interface GameState {
   inventoryFilter: InventoryFilter;
 }
 
-// ---------- ГЕНЕРАЦИЯ ID ----------
-
 function genId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID();
@@ -52,23 +51,12 @@ function genId(): string {
   return `c${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-// ---------- ГЕОМЕТРИЯ ПОЛЯ ----------
+// ---------- ГЕОМЕТРИЯ ----------
 
-export function slotRow(slot: number): number {
-  return Math.floor(slot / FIELD_COLS);
-}
-
-export function slotCol(slot: number): number {
-  return slot % FIELD_COLS;
-}
-
-export function frontOf(slot: number): number {
-  return slotCol(slot);
-}
-
-export function backOf(slot: number): number {
-  return FIELD_COLS + slotCol(slot);
-}
+export function slotRow(slot: number): number { return Math.floor(slot / FIELD_COLS); }
+export function slotCol(slot: number): number { return slot % FIELD_COLS; }
+export function frontOf(slot: number): number { return slotCol(slot); }
+export function backOf(slot: number): number { return FIELD_COLS + slotCol(slot); }
 
 // ---------- ХЕЛПЕРЫ ----------
 
@@ -112,6 +100,10 @@ function hasLivingWitch(field: (CardInstance | null)[]): boolean {
   return field.some(c => c !== null && c.currentHp > 0 && hasAbility(c, 'witch'));
 }
 
+function hasLivingHealer(field: (CardInstance | null)[]): boolean {
+  return field.some(c => c !== null && c.currentHp > 0 && hasAbility(c, 'heal_aura'));
+}
+
 function instantiate(defId: CardId): CardInstance {
   const def = CATALOG[defId];
   return {
@@ -120,6 +112,7 @@ function instantiate(defId: CardId): CardInstance {
     currentHp: def.health,
     shield: defHasAbility(defId, 'shield') ? SHIELD_ON_SPAWN : 0,
     poison: 0,
+    frozen: 0,
   };
 }
 
@@ -195,9 +188,14 @@ export function refillHand(state: GameState): void {
 function spawnEnemyWave(state: GameState): void {
   const melee: CardId[]  = ['goblin', 'slime', 'knight'];
   const ranged: CardId[] = ['archer'];
+
+  if (state.turn > 3) { ranged.push('shaman'); }
   if (state.turn > 4) { melee.push('vampire'); ranged.push('mage'); }
+  if (state.turn > 5) { ranged.push('necromancer'); }
   if (state.turn > 6) { melee.push('berserker'); }
+  if (state.turn > 7) { ranged.push('priest', 'ice_elemental'); melee.push('golem'); }
   if (state.turn > 8) { ranged.push('dragon'); }
+  if (state.turn > 9) { melee.push('assassin'); }
   if (state.turn > 10) { ranged.push('witch'); }
 
   const frontSlots = [0, 1, 2, 3];
@@ -311,6 +309,28 @@ export function placeCardInSlot(state: GameState, instanceId: string, slot: numb
 
   const [card] = state.player.hand.splice(idx, 1);
   state.player.field[slot] = card;
+
+  // Battlecry — эффект при выходе
+  if (hasAbility(card, 'battlecry')) {
+    let hits = 0;
+    for (let i = 0; i < FIELD_SLOTS; i++) {
+      const ec = state.enemy.field[i];
+      if (!ec || ec.currentHp <= 0) continue;
+      // pierce не относится к battlecry, но щит всё равно поглощает
+      let dmg = BATTLECRY_DAMAGE;
+      if (ec.shield > 0) {
+        const absorbed = Math.min(ec.shield, dmg);
+        ec.shield -= absorbed;
+        dmg -= absorbed;
+      }
+      ec.currentHp -= dmg;
+      hits++;
+    }
+    if (hits > 0) {
+      state.log.push(`⚡ ${CATALOG[card.defId].name} бьёт по всем: ${hits} врагов`);
+    }
+  }
+
   return true;
 }
 
@@ -380,7 +400,10 @@ export function mergeCards(state: GameState, id1: string, id2: string): MergeRes
   const d2 = CATALOG[c2.defId];
 
   const targetRarity = d1.rarity === 'common' ? 'rare' : 'epic';
-  const pool = Object.values(CATALOG).filter(c => c.rarity === targetRarity);
+  // Скелет — служебная карта, не выпадает
+  const pool = Object.values(CATALOG).filter(
+    c => c.rarity === targetRarity && c.id !== 'skeleton'
+  );
 
   if (pool.length === 0) {
     return { ok: false, message: 'Нет карт для результата' };
@@ -438,21 +461,10 @@ export function goToBattle(state: GameState): void {
   state.showInventory = false;
 }
 
-export function setMenuTab(state: GameState, tab: MenuTab): void {
-  state.menuTab = tab;
-}
-
-export function toggleInventory(state: GameState): void {
-  state.showInventory = !state.showInventory;
-}
-
-export function setInventorySort(state: GameState, sort: InventorySort): void {
-  state.inventorySort = sort;
-}
-
-export function setInventoryFilter(state: GameState, filter: InventoryFilter): void {
-  state.inventoryFilter = filter;
-}
+export function setMenuTab(state: GameState, tab: MenuTab): void { state.menuTab = tab; }
+export function toggleInventory(state: GameState): void { state.showInventory = !state.showInventory; }
+export function setInventorySort(state: GameState, sort: InventorySort): void { state.inventorySort = sort; }
+export function setInventoryFilter(state: GameState, filter: InventoryFilter): void { state.inventoryFilter = filter; }
 
 // ---------- БОЙ ----------
 
@@ -467,30 +479,39 @@ export function resolveBattle(state: GameState): void {
   state.log = [];
   state.battleEvents = [];
 
-  tickStartOfTurn(state.player.field, state.enemy.field, state.log, 'Ваш',        state.battleEvents, state.rng);
-  tickStartOfTurn(state.enemy.field,  state.player.field, state.log, 'Вражеский',  state.battleEvents, state.rng);
+  tickStartOfTurn(state.player.field, state.enemy.field, state.log, 'Ваш',        state.battleEvents);
+  tickStartOfTurn(state.enemy.field,  state.player.field, state.log, 'Вражеский',  state.battleEvents);
 
   const playerDead: CardInstance[] = [];
   const enemyDead:  CardInstance[] = [];
 
-  playerDead.push(...cleanupField(state.player, state.log, true, state.battleEvents));
-  enemyDead.push(...cleanupField(state.enemy,  state.log, false, state.battleEvents));
+  playerDead.push(...cleanupField(state.player, state.log, true, state.battleEvents, state));
+  enemyDead.push(...cleanupField(state.enemy,  state.log, false, state.battleEvents, state));
 
+  // Собираем атакующих. Замороженные пропускают ход.
   const attacks: { attacker: CardInstance; defender: CardInstance; slot: number }[] = [];
 
   for (let s = 0; s < FIELD_SLOTS; s++) {
     const pc = state.player.field[s];
-    if (pc && pc.currentHp > 0) {
+    if (pc && pc.currentHp > 0 && pc.frozen === 0) {
       const target = pickTarget(state.enemy.field, s, isRanged(pc));
       if (target) attacks.push({ attacker: pc, defender: target, slot: s });
     }
   }
   for (let s = 0; s < FIELD_SLOTS; s++) {
     const ec = state.enemy.field[s];
-    if (ec && ec.currentHp > 0) {
+    if (ec && ec.currentHp > 0 && ec.frozen === 0) {
       const target = pickTarget(state.player.field, s, isRanged(ec));
       if (target) attacks.push({ attacker: ec, defender: target, slot: s });
     }
+  }
+
+  // Уменьшаем frozen ПОСЛЕ формирования списка атак
+  for (let i = 0; i < FIELD_SLOTS; i++) {
+    const p = state.player.field[i];
+    if (p && p.frozen > 0) p.frozen--;
+    const e = state.enemy.field[i];
+    if (e && e.frozen > 0) e.frozen--;
   }
 
   for (const atk of attacks) {
@@ -499,8 +520,8 @@ export function resolveBattle(state: GameState): void {
     fightPair(atk.attacker, atk.defender, atk.slot, state);
   }
 
-  playerDead.push(...cleanupField(state.player, state.log, true, state.battleEvents));
-  enemyDead.push(...cleanupField(state.enemy,  state.log, false, state.battleEvents));
+  playerDead.push(...cleanupField(state.player, state.log, true, state.battleEvents, state));
+  enemyDead.push(...cleanupField(state.enemy,  state.log, false, state.battleEvents, state));
 
   if (playerDead.length > 0) {
     const deadIds = new Set(playerDead.map(c => c.instanceId));
@@ -510,8 +531,12 @@ export function resolveBattle(state: GameState): void {
     }
   }
 
+  // Трофеи — только «настоящие» карты, не призванные скелеты
   if (enemyDead.length > 0) {
-    state.spoils.push(...enemyDead.map(c => instantiate(c.defId)));
+    const spoils = enemyDead
+      .filter(c => c.defId !== 'skeleton')
+      .map(c => instantiate(c.defId));
+    state.spoils.push(...spoils);
   }
 
   awardCrystals(state, playerDead);
@@ -537,6 +562,7 @@ export function resolveBattle(state: GameState): void {
   spawnEnemyWave(state);
 }
 
+// Выбор цели с учётом taunt
 function pickTarget(
   enemyField: (CardInstance | null)[],
   attackerSlot: number,
@@ -546,11 +572,17 @@ function pickTarget(
   const back  = enemyField[backOf(attackerSlot)];
   const frontAlive = !!(front && front.currentHp > 0);
   const backAlive  = !!(back  && back.currentHp  > 0);
+  const frontTaunt = frontAlive && front && hasAbility(front, 'taunt');
+  const backTaunt  = backAlive  && back  && hasAbility(back,  'taunt');
 
   if (ranged) {
+    if (backTaunt)  return back;
+    if (frontTaunt) return front;
     if (backAlive)  return back;
     if (frontAlive) return front;
   } else {
+    if (frontTaunt) return front;
+    if (backTaunt)  return back;
     if (frontAlive) return front;
     if (backAlive)  return back;
   }
@@ -578,20 +610,32 @@ function tickStartOfTurn(
   log: string[],
   owner: string,
   events: BattleEvent[],
-  rng: RNG,
 ): void {
   const oppHasWitch = hasLivingWitch(opponentField);
+  const ownHasHealer = hasLivingHealer(ownField);
 
   for (const card of ownField) {
     if (!card || card.currentHp <= 0) continue;
     const def = CATALOG[card.defId];
 
+    // Проклятие Ведьмы
     if (oppHasWitch) {
       card.currentHp -= 1;
       log.push(`🌙 ${owner} ${def.name} теряет 1 HP от проклятия`);
       events.push({ type: 'witchAura', targetId: card.instanceId, damage: 1 });
     }
 
+    // Аура лечения — Жрец
+    if (ownHasHealer && card.currentHp < def.health) {
+      const healed = Math.min(HEAL_AURA_AMOUNT, def.health - card.currentHp);
+      card.currentHp += healed;
+      if (healed > 0) {
+        log.push(`✨ ${owner} ${def.name} +${healed} HP (аура жреца)`);
+        events.push({ type: 'heal', targetId: card.instanceId, amount: healed });
+      }
+    }
+
+    // Обычная регенерация
     if (hasAbility(card, 'regen') && card.currentHp < def.health) {
       const healed = Math.min(REGEN_AMOUNT, def.health - card.currentHp);
       card.currentHp += healed;
@@ -599,6 +643,7 @@ function tickStartOfTurn(
       events.push({ type: 'heal', targetId: card.instanceId, amount: healed });
     }
 
+    // Яд
     if (card.poison > 0) {
       card.currentHp -= card.poison;
       log.push(`☠️ ${owner} ${def.name} получает ${card.poison} от яда`);
@@ -606,8 +651,6 @@ function tickStartOfTurn(
       card.poison--;
     }
   }
-
-  void rng;
 }
 
 function cleanupField(
@@ -615,24 +658,38 @@ function cleanupField(
   log: string[],
   isPlayer: boolean,
   events: BattleEvent[],
+  state: GameState,
 ): CardInstance[] {
   const dead: CardInstance[] = [];
+
   for (let i = 0; i < FIELD_SLOTS; i++) {
     const c = side.field[i];
     if (c && c.currentHp <= 0) {
       dead.push(c);
+
       if (isPlayer) {
         side.lost.push(c);
         log.push(`💀 ${CATALOG[c.defId].name} потерян навсегда`);
       }
+
       events.push({
         type: 'death',
         cardId: c.instanceId,
         side: isPlayer ? 'player' : 'enemy',
       });
-      side.field[i] = null;
+
+      // Deathrattle — призвать скелета в этот же слот
+      if (hasAbility(c, 'deathrattle')) {
+        const skeleton = instantiate('skeleton');
+        side.field[i] = skeleton;
+        log.push(`💀 ${CATALOG[c.defId].name} призывает Скелета`);
+      } else {
+        side.field[i] = null;
+      }
     }
   }
+
+  void state;
   return dead;
 }
 
@@ -693,13 +750,17 @@ function strikeOnce(
 
   let dmg = aDef.attack;
 
+  // Аура Ведьмы — урон вдвое меньше
   const attackerIsPlayer = state.player.field.some(c => c === attacker);
   const defenderSide = attackerIsPlayer ? state.enemy.field : state.player.field;
   if (hasLivingWitch(defenderSide)) {
     dmg = Math.max(1, Math.floor(dmg / 2));
   }
 
-  if (defender.shield > 0) {
+  // Pierce — игнорируем щит
+  const pierce = hasAbility(attacker, 'pierce');
+
+  if (!pierce && defender.shield > 0) {
     const absorbed = Math.min(defender.shield, dmg);
     defender.shield -= absorbed;
     dmg -= absorbed;
@@ -707,6 +768,9 @@ function strikeOnce(
       state.log.push(`🛡️ ${dDef.name} поглощает ${absorbed}`);
       state.battleEvents.push({ type: 'shield', targetId: defender.instanceId, absorbed });
     }
+  } else if (pierce && defender.shield > 0) {
+    state.log.push(`🗡️ ${aDef.name} пробивает щит`);
+    // Щит не уменьшается, урон идёт напрямую
   }
 
   defender.currentHp -= dmg;
@@ -734,6 +798,14 @@ function strikeOnce(
     state.battleEvents.push({ type: 'poison', targetId: defender.instanceId, stacks: defender.poison });
   }
 
+  // Freeze — замораживаем цель
+  if (hasAbility(attacker, 'freeze') && defender.currentHp > 0 && defender.frozen === 0) {
+    defender.frozen = 1;
+    state.log.push(`❄️ ${dDef.name} заморожен`);
+    state.battleEvents.push({ type: 'freeze', targetId: defender.instanceId });
+  }
+
+  // Ведьма — 25% отравить всех
   if (hasAbility(attacker, 'witch')) {
     if (state.rng.next() < WITCH_POISON_CHANCE) {
       const enemyField = attackerIsPlayer ? state.enemy.field : state.player.field;
@@ -815,7 +887,8 @@ export function skipSpoils(state: GameState): void {
 // ---------- ПАКИ ----------
 
 function rollPackCards(state: GameState): CardInstance[] {
-  const pool = Object.values(CATALOG);
+  // Скелет не выпадает из паков
+  const pool = Object.values(CATALOG).filter(c => c.id !== 'skeleton');
   const rolled: CardInstance[] = [];
   const deck = getActiveDeck(state);
 
