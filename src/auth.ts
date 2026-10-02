@@ -1,4 +1,4 @@
-import type { GameState } from './core/game';
+import { SAVE_VERSION, type GameState } from './core/game';
 import { RNG } from './core/rng';
 
 const USERS_KEY   = 'cards_users';
@@ -106,6 +106,17 @@ export function loadGame(nick: string): GameState | null {
   if (!raw) return null;
   try {
     const obj = JSON.parse(raw);
+
+    // Проверка версии — если старая или отсутствует, отбрасываем сохранение
+    if (typeof obj?.version !== 'number' || obj.version !== SAVE_VERSION) {
+      console.warn(
+        `[save] Версия сохранения не совпадает (ожидается ${SAVE_VERSION}, ` +
+        `найдено ${obj?.version ?? 'нет'}). Создаём новую игру.`
+      );
+      localStorage.removeItem(saveKey(nick));
+      return null;
+    }
+
     if (obj.rng && typeof obj.rng === 'object' && '__rng' in obj.rng) {
       obj.rng = RNG.deserialize(obj.rng.__rng);
     }

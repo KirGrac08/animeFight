@@ -10,7 +10,10 @@ import type { AbilityId, CardId, CardInstance, MenuTab, Phase, Screen, Side } fr
 export type InventorySort = 'default' | 'name' | 'attack' | 'health' | 'rarity';
 export type InventoryFilter = 'all' | 'common' | 'rare' | 'epic';
 
+export const SAVE_VERSION = 3;
+
 export interface GameState {
+  version: number;
   rng: RNG;
   turn: number;
   phase: Phase;
@@ -76,6 +79,7 @@ function shuffle<T>(arr: T[], rng: RNG): T[] {
 export function createInitialState(seed?: number): GameState {
   const deck = STARTER_DECK.map(instantiate);
   const state: GameState = {
+    version: SAVE_VERSION,
     rng: new RNG(seed),
     turn: 1,
     phase: 'placing',
