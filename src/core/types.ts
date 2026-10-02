@@ -9,7 +9,8 @@ export type AbilityId =
   | 'poison'
   | 'regen'
   | 'shield'
-  | 'splash';
+  | 'splash'
+  | 'witch';
 
 export interface CardDef {
   id: CardId;
@@ -30,7 +31,6 @@ export interface CardInstance {
   poison: number;
 }
 
-// Поле — 8 слотов: [0..3] передний ряд, [4..7] задний
 export interface Side {
   hand: CardInstance[];
   field: (CardInstance | null)[];
@@ -44,6 +44,7 @@ export type BattleEvent =
   | { type: 'heal';       targetId: string; amount: number }
   | { type: 'poison';     targetId: string; stacks: number }
   | { type: 'poisonTick'; targetId: string; damage: number }
+  | { type: 'witchAura';  targetId: string; damage: number }
   | { type: 'death';      cardId: string; side: 'player' | 'enemy' };
 
 export type Phase = 'placing' | 'battle' | 'pack' | 'spoils';

@@ -35,6 +35,9 @@ interface DragState {
 }
 let drag: DragState | null = null;
 
+let mergeMode = false;
+let mergeSelected: string[] = [];
+
 const ANIM = {
   beforeBattle:  500,
   afterBattle:   700,
@@ -48,6 +51,7 @@ const ANIM = {
     shield:      350,
     heal:        400,
     poison:      350,
+    witchAura:   220,
   },
 } as const;
 
@@ -281,7 +285,12 @@ function renderMenu() {
     const btn = document.createElement('button');
     btn.className = `tab ${state!.menuTab === id ? 'active' : ''}`;
     btn.textContent = label;
-    btn.onclick = () => { G.setMenuTab(state!, id); render(); };
+    btn.onclick = () => {
+      mergeMode = false;
+      mergeSelected = [];
+      G.setMenuTab(state!, id);
+      render();
+    };
     tabs.appendChild(btn);
   });
   menu.appendChild(tabs);
@@ -438,6 +447,7 @@ function deckSelector(): HTMLElement {
     const chip = document.createElement('button');
     chip.className = `deck-chip ${deck.id === state!.activeDeckId ? 'active' : ''}`;
     chip.textContent = `${deck.name} (${deck.cardIds.length})`;
+    chip.disabled = mergeMode;
     chip.onclick = () => { G.setActiveDeck(state!, deck.id); render(); };
     chips.appendChild(chip);
   });
@@ -449,6 +459,7 @@ function deckSelector(): HTMLElement {
   const addBtn = document.createElement('button');
   addBtn.className = 'chip';
   addBtn.textContent = '+ Новая';
+  addBtn.disabled = mergeMode;
   addBtn.onclick = () => {
     const name = prompt('Название новой колоды:', `Колода ${state!.decks.length + 1}`);
     if (name === null) return;
@@ -460,6 +471,7 @@ function deckSelector(): HTMLElement {
   const renameBtn = document.createElement('button');
   renameBtn.className = 'chip';
   renameBtn.textContent = '✎ Переименовать';
+  renameBtn.disabled = mergeMode;
   renameBtn.onclick = () => {
     const active = G.getActiveDeck(state!);
     const name = prompt('Новое название:', active.name);
@@ -472,7 +484,7 @@ function deckSelector(): HTMLElement {
   const delBtn = document.createElement('button');
   delBtn.className = 'chip danger';
   delBtn.textContent = '🗑 Удалить';
-  delBtn.disabled = state!.decks.length <= 1;
+  delBtn.disabled = state!.decks.length <= 1 || mergeMode;
   delBtn.onclick = () => {
     const active = G.getActiveDeck(state!);
     if (!confirm(`Удалить колоду «${active.name}»?`)) return;
@@ -485,9 +497,75 @@ function deckSelector(): HTMLElement {
   return wrap;
 }
 
+function mergeBar(): HTMLElement {
+  const bar = document.createElement('div');
+  bar.className = 'merge-bar';
+
+  const hint = document.createElement('span');
+  hint.className = 'merge-hint';
+  if (!mergeMode) {
+    hint.textContent = '🔮 Объедини 2 карты одной редкости, чтобы получить 1 карту выше.';
+  } else if (mergeSelected.length === 0) {
+    hint.textContent = 'Выбери первую карту';
+  } else if (mergeSelected.length === 1) {
+    hint.textContent = 'Выбери вторую карту той же редкости';
+  } else {
+    hint.textContent = 'Готово — нажми «Объединить»';
+  }
+  bar.appendChild(hint);
+
+  const actions = document.createElement('div');
+  actions.className = 'merge-actions';
+
+  if (!mergeMode) {
+    const startBtn = document.createElement('button');
+    startBtn.className = 'chip';
+    startBtn.textContent = '🔮 Объединить карты';
+    startBtn.onclick = () => {
+      mergeMode = true;
+      mergeSelected = [];
+      render();
+    };
+    actions.appendChild(startBtn);
+  } else {
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'chip';
+    cancelBtn.textContent = '✕ Отмена';
+    cancelBtn.onclick = () => {
+      mergeMode = false;
+      mergeSelected = [];
+      render();
+    };
+    actions.appendChild(cancelBtn);
+
+    if (mergeSelected.length === 2) {
+      const mergeBtn = document.createElement('button');
+      mergeBtn.className = 'chip active';
+      mergeBtn.textContent = '🔮 Объединить';
+      mergeBtn.onclick = () => {
+        if (!state) return;
+        const [id1, id2] = mergeSelected;
+        const res = G.mergeCards(state, id1, id2);
+        if (!res.ok) {
+          alert(res.message);
+          return;
+        }
+        mergeMode = false;
+        mergeSelected = [];
+        render();
+      };
+      actions.appendChild(mergeBtn);
+    }
+  }
+
+  bar.appendChild(actions);
+  return bar;
+}
+
 function inventoryContent(): HTMLElement {
   const wrap = document.createElement('div');
 
+  wrap.appendChild(mergeBar());
   wrap.appendChild(deckSelector());
 
   const active = G.getActiveDeck(state!);
@@ -496,11 +574,15 @@ function inventoryContent(): HTMLElement {
 
   const deckInfo = document.createElement('div');
   deckInfo.className = 'deck-info';
-  deckInfo.innerHTML = `
-    🎴 В колоде «${active.name}»: <b class="${ready ? 'ok' : 'bad'}">${inDeck} / ${MAX_DECK_SIZE}</b>
-    <small>(минимум ${MIN_DECK_SIZE}, максимум ${MAX_DECK_SIZE})</small>
-    &nbsp;·&nbsp; клик по карте — добавить/убрать
-  `;
+  if (mergeMode) {
+    deckInfo.innerHTML = `🔮 Выбрано: <b>${mergeSelected.length} / 2</b> — клик по карте для выбора`;
+  } else {
+    deckInfo.innerHTML = `
+      🎴 В колоде «${active.name}»: <b class="${ready ? 'ok' : 'bad'}">${inDeck} / ${MAX_DECK_SIZE}</b>
+      <small>(минимум ${MIN_DECK_SIZE}, максимум ${MAX_DECK_SIZE})</small>
+      &nbsp;·&nbsp; клик по карте — добавить/убрать
+    `;
+  }
   wrap.appendChild(deckInfo);
 
   const sortRow = document.createElement('div');
@@ -547,45 +629,123 @@ function inventoryContent(): HTMLElement {
   wrap.appendChild(filterRow);
 
   const colTitle = document.createElement('h3');
-  colTitle.textContent = `Коллекция (${state!.collection.length})`;
+  colTitle.textContent = mergeMode
+    ? `Выбор карт для объединения (${state!.collection.length})`
+    : `Коллекция (${state!.collection.length})`;
   wrap.appendChild(colTitle);
 
   const colGrid = document.createElement('div');
   colGrid.className = 'inventory-grid';
-  const visible = G.sortAndFilterCollection(state!);
 
-  if (visible.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'empty';
-    empty.textContent = 'Пусто';
-    colGrid.appendChild(empty);
-  } else {
-    visible.forEach(sample => {
-      const count = G.countByDefId(state!, sample.defId);
-      const inDeckCount = G.countInActiveDeckByDefId(state!, sample.defId);
-      const allInDeck = inDeckCount === count && count > 0;
-      const someInDeck = inDeckCount > 0 && inDeckCount < count;
+  if (mergeMode) {
+    // === РЕЖИМ ОБЪЕДИНЕНИЯ ===
+    const allCards = G.sortedFilteredAllCards(state!);
 
-      const el = cardEl(sample, {
-        showCount: count,
-        inDeck: allInDeck,
-        partialDeck: someInDeck,
-        deckToggle: () => {
-          const copies = state!.collection.filter(c => c.defId === sample.defId);
-          const target = allInDeck
-            ? copies.find(c => G.isInActiveDeck(state!, c.instanceId))
-            : copies.find(c => !G.isInActiveDeck(state!, c.instanceId));
-          if (!target) return;
-          G.toggleCardInDeck(state!, target.instanceId);
-          render();
-        },
+    if (allCards.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'Пусто';
+      colGrid.appendChild(empty);
+    } else {
+      allCards.forEach(card => {
+        const isSelected = mergeSelected.includes(card.instanceId);
+        const el = cardEl(card);
+        el.classList.add('merge-card');
+        el.dataset.merge = '1';
+        if (isSelected) el.classList.add('merge-selected');
+
+        // Если уже выбрана одна карта — несовместимые гасим
+        if (mergeSelected.length === 1 && !isSelected) {
+          const firstId = mergeSelected[0];
+          const c1 = state!.collection.find(c => c.instanceId === firstId);
+          const r1 = c1 ? CATALOG[c1.defId].rarity : '';
+          const r2 = CATALOG[card.defId].rarity;
+          if (r1 !== r2 || r1 === 'epic') {
+            el.classList.add('merge-incompatible');
+          }
+        }
+
+        colGrid.appendChild(el);
       });
-      colGrid.appendChild(el);
-    });
+
+      // Один обработчик на всю сетку — без дублей
+      colGrid.onclick = (e) => {
+        const target = (e.target as HTMLElement).closest('.card[data-merge]') as HTMLElement | null;
+        if (!target) return;
+        e.stopPropagation();
+        e.preventDefault();
+
+        const id = target.dataset.cardId;
+        if (!id || !state) return;
+
+        // Клик по уже выбранной — снять выбор
+        const idx = mergeSelected.indexOf(id);
+        if (idx >= 0) {
+          mergeSelected.splice(idx, 1);
+          render();
+          return;
+        }
+
+        // Уже 2 — игнор
+        if (mergeSelected.length >= 2) return;
+
+        // Клик по первой
+        if (mergeSelected.length === 0) {
+          mergeSelected = [id];
+          render();
+          return;
+        }
+
+        // Клик по второй — проверяем совместимость
+        const check = G.canMerge(state, mergeSelected[0], id);
+        if (!check.ok) {
+          // Несовместима — заменяем выбор этой картой
+          mergeSelected = [id];
+          render();
+          return;
+        }
+
+        mergeSelected = [mergeSelected[0], id];
+        render();
+      };
+    }
+  } else {
+    // === ОБЫЧНЫЙ РЕЖИМ ===
+    const visible = G.sortAndFilterCollection(state!);
+
+    if (visible.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'Пусто';
+      colGrid.appendChild(empty);
+    } else {
+      visible.forEach(sample => {
+        const count = G.countByDefId(state!, sample.defId);
+        const inDeckCount = G.countInActiveDeckByDefId(state!, sample.defId);
+        const allInDeck = inDeckCount === count && count > 0;
+        const someInDeck = inDeckCount > 0 && inDeckCount < count;
+
+        const el = cardEl(sample, {
+          showCount: count,
+          inDeck: allInDeck,
+          partialDeck: someInDeck,
+          deckToggle: () => {
+            const copies = state!.collection.filter(c => c.defId === sample.defId);
+            const target = allInDeck
+              ? copies.find(c => G.isInActiveDeck(state!, c.instanceId))
+              : copies.find(c => !G.isInActiveDeck(state!, c.instanceId));
+            if (!target) return;
+            G.toggleCardInDeck(state!, target.instanceId);
+            render();
+          },
+        });
+        colGrid.appendChild(el);
+      });
+    }
   }
   wrap.appendChild(colGrid);
 
-  if (state!.player.lost.length > 0) {
+  if (state!.player.lost.length > 0 && !mergeMode) {
     const lostTitle = document.createElement('h3');
     lostTitle.style.marginTop = '24px';
     lostTitle.textContent = `🪦 Потеряно навсегда (${state!.player.lost.length})`;
@@ -913,6 +1073,7 @@ function eventDuration(ev: BattleEvent): number {
     case 'shield':     return ANIM.duration.shield;
     case 'heal':       return ANIM.duration.heal;
     case 'poison':     return ANIM.duration.poison;
+    case 'witchAura':  return ANIM.duration.witchAura;
   }
 }
 
@@ -944,6 +1105,7 @@ function flashEvent(ev: BattleEvent): void {
       break;
     case 'poison':
     case 'poisonTick':
+    case 'witchAura':
       getCardEl(ev.targetId)?.classList.add('poisoned');
       setTimeout(() => getCardEl(ev.targetId)?.classList.remove('poisoned'), 350);
       break;
@@ -977,7 +1139,8 @@ function applyEventToField(
       break;
     }
     case 'poisonTick':
-    case 'splash': {
+    case 'splash':
+    case 'witchAura': {
       const target = find(ev.targetId);
       if (target) target.currentHp -= ev.damage;
       break;
@@ -1105,6 +1268,7 @@ async function animateBattle(): Promise<void> {
       case 'heal':
       case 'shield':
       case 'poison':
+      case 'witchAura':
         updateCardDom(ev.targetId, getCardById(ev.targetId));
         break;
       case 'death':
@@ -1166,7 +1330,12 @@ function renderInventoryOverlay() {
   const overlay = document.createElement('div');
   overlay.className = 'overlay';
   overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) { G.toggleInventory(state!); render(); }
+    if (e.target === overlay) {
+      mergeMode = false;
+      mergeSelected = [];
+      G.toggleInventory(state!);
+      render();
+    }
   });
 
   const panel = document.createElement('div');
@@ -1180,7 +1349,12 @@ function renderInventoryOverlay() {
   const closeBtn = document.createElement('button');
   closeBtn.className = 'btn-secondary';
   closeBtn.textContent = '✕ Закрыть';
-  closeBtn.onclick = () => { G.toggleInventory(state!); render(); };
+  closeBtn.onclick = () => {
+    mergeMode = false;
+    mergeSelected = [];
+    G.toggleInventory(state!);
+    render();
+  };
   header.appendChild(closeBtn);
   panel.appendChild(header);
 
