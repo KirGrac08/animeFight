@@ -2,9 +2,13 @@ import './style.css';
 import { ABILITY_INFO, CATALOG, PACK_PRICE, MIN_DECK_SIZE, MAX_DECK_SIZE } from './core/cards';
 import * as G from './core/game';
 import * as Auth from './auth';
-import type { CardInstance, MenuTab } from './core/types';
+import type { CardInstance, MenuTab, BattleEvent } from './core/types';
 
 const app = document.getElementById('app')!;
+
+// ============================================================
+// UI-состояние
+// ============================================================
 
 type AuthTab = 'login' | 'register';
 
@@ -23,6 +27,7 @@ const ui: AppUi = {
 };
 
 let state: G.GameState | null = null;
+let isAnimating = false;
 
 function bootstrap() {
   const nick = Auth.getSession();
@@ -49,6 +54,7 @@ function cardEl(card: CardInstance, opts: CardOpts = {}): HTMLElement {
   const el = document.createElement('div');
   el.className = `card ${def.rarity}`;
   el.dataset.cardId = card.instanceId;
+
   if (opts.inDeck) el.classList.add('in-deck');
   if (opts.partialDeck) el.classList.add('partially-in-deck');
 
@@ -358,15 +364,15 @@ function renderPacksTab(root: HTMLElement) {
   count.innerHTML = `Доступно паков: <b>${state!.packs}</b> &nbsp;·&nbsp; 💎 ${state!.crystals}`;
   panel.appendChild(count);
 
-  const row = document.createElement('div');
-  row.className = 'controls';
+  const rowBox = document.createElement('div');
+  rowBox.className = 'controls';
 
   const openBtn = document.createElement('button');
   openBtn.className = 'primary-btn pack';
   openBtn.textContent = '🎁 Открыть пак';
   openBtn.disabled = state!.packs <= 0;
   openBtn.onclick = () => { G.openPack(state!); render(); };
-  row.appendChild(openBtn);
+  rowBox.appendChild(openBtn);
 
   const buyBtn = document.createElement('button');
   buyBtn.className = 'primary-btn';
@@ -377,9 +383,9 @@ function renderPacksTab(root: HTMLElement) {
     if (!ok) alert('Недостаточно кристаллов');
     render();
   };
-  row.appendChild(buyBtn);
+  rowBox.appendChild(buyBtn);
 
-  panel.appendChild(row);
+  panel.appendChild(rowBox);
 
   if (state!.log.length) {
     const logTitle = document.createElement('h3');
@@ -485,11 +491,10 @@ function inventoryContent(): HTMLElement {
         inDeck: allInDeck,
         partialDeck: someInDeck,
         deckToggle: () => {
-          // Найдём копию этого defId, которую нужно переключить
           const copies = state!.collection.filter(c => c.defId === sample.defId);
           const target = allInDeck
-            ? copies.find(c => G.isInDeck(state!, c.instanceId))          // убрать одну
-            : copies.find(c => !G.isInDeck(state!, c.instanceId));         // добавить одну
+            ? copies.find(c => G.isInDeck(state!, c.instanceId))
+            : copies.find(c => !G.isInDeck(state!, c.instanceId));
           if (!target) return;
           G.toggleCardInDeck(state!, target.instanceId);
           render();
@@ -526,10 +531,279 @@ function inventoryContent(): HTMLElement {
 }
 
 // ============================================================
-// Бой
+// Анимации боя
 // ============================================================
 
-renderBattleScreen
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+function eventDuration(ev: BattleEvent): number {
+  switch (ev.type) {
+    case 'attack':     return 220;
+    case 'splash':     return 140;
+    case 'death':      return 320;
+    case 'poisonTick': return 160;
+    case 'shield':     return 120;
+    case 'heal':       return 140;
+    case 'poison':     return 120;
+  }
+}
+
+function getCardEl(id: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`[data-card-id="${id}"]`);
+}
+
+function flashEvent(ev: BattleEvent): void {
+  switch (ev.type) {
+    case 'attack':
+      getCardEl(ev.attackerId)?.classList.add('attacking');
+      getCardEl(ev.defenderId)?.classList.add('hit');
+      setTimeout(() => {
+        getCardEl(ev.attackerId)?.classList.remove('attacking');
+        getCardEl(ev.defenderId)?.classList.remove('hit');
+      }, 300);
+      break;
+    case 'splash':
+      getCardEl(ev.targetId)?.classList.add('hit');
+      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('hit'), 250);
+      break;
+    case 'heal':
+      getCardEl(ev.targetId)?.classList.add('healed');
+      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('healed'), 300);
+      break;
+    case 'shield':
+      getCardEl(ev.targetId)?.classList.add('shielded');
+      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('shielded'), 250);
+      break;
+    case 'poison':
+    case 'poisonTick':
+      getCardEl(ev.targetId)?.classList.add('poisoned');
+      setTimeout(() => getCardEl(ev.targetId)?.classList.remove('poisoned'), 250);
+      break;
+    case 'death':
+      getCardEl(ev.cardId)?.classList.add('dying');
+      break;
+  }
+}
+
+function applyEventToField(player: CardInstance[], enemy: CardInstance[], ev: BattleEvent): void {
+  const find = (id: string) => [...player, ...enemy].find(c => c.instanceId === id);
+
+  switch (ev.type) {
+    case 'attack': {
+      const target = find(ev.defenderId);
+      if (target) target.currentHp -= ev.damage;
+      break;
+    }
+    case 'poisonTick':
+    case 'splash': {
+      const target = find(ev.targetId);
+      if (target) target.currentHp -= ev.damage;
+      break;
+    }
+    case 'heal': {
+      const target = find(ev.targetId);
+      if (target) target.currentHp += ev.amount;
+      break;
+    }
+    case 'shield': {
+      const target = find(ev.targetId);
+      if (target) target.shield = Math.max(0, target.shield - ev.absorbed);
+      break;
+    }
+    case 'poison': {
+      const target = find(ev.targetId);
+      if (target) target.poison = ev.stacks;
+      break;
+    }
+    case 'death': {
+      const arr = ev.side === 'player' ? player : enemy;
+      const idx = arr.findIndex(c => c.instanceId === ev.cardId);
+      if (idx >= 0) arr.splice(idx, 1);
+      break;
+    }
+  }
+}
+
+async function animateBattle(): Promise<void> {
+  if (!state || isAnimating) return;
+  if (state.phase !== 'placing' || state.player.field.length === 0) return;
+
+  isAnimating = true;
+
+  // Снимок «до боя»
+  const displayPlayer = state.player.field.map(c => ({ ...c }));
+  const displayEnemy  = state.enemy.field.map(c => ({ ...c }));
+
+  // Прогон боя — state мутируется
+  G.resolveBattle(state);
+  const events = state.battleEvents.slice();
+  const postPlayer = state.player.field;
+  const postEnemy  = state.enemy.field;
+
+  // Показываем «до боя»
+  state.player.field = displayPlayer;
+  state.enemy.field  = displayEnemy;
+  render();
+  await sleep(250);
+
+  // Проигрываем события
+  for (const ev of events) {
+    flashEvent(ev);
+    applyEventToField(state.player.field, state.enemy.field, ev);
+    render();
+    await sleep(eventDuration(ev));
+  }
+
+  // Возвращаем финальные поля
+  state.player.field = postPlayer;
+  state.enemy.field  = postEnemy;
+  isAnimating = false;
+  render();
+}
+
+// ============================================================
+// Экран боя
+// ============================================================
+
+function renderBattleScreen() {
+  app.appendChild(renderTopBar());
+
+  const header = document.createElement('div');
+  header.className = 'header';
+
+  const stats = [
+    `🌀 Ход ${state!.turn}`,
+    `🎴 Дека: ${state!.deckIds.length}`,
+    `📚 Осталось: ${state!.player.deck.length}`,
+    `✋ Рука: ${state!.player.hand.length}`,
+    `🪦 Потеряно: ${state!.player.lost.length}`,
+    `💎 ${state!.crystals}`,
+  ];
+  stats.forEach(s => {
+    const span = document.createElement('span');
+    span.textContent = s;
+    header.appendChild(span);
+  });
+
+  const invBtn = document.createElement('button');
+  invBtn.className = 'icon-btn';
+  invBtn.textContent = `📦 (${state!.collection.length})`;
+  invBtn.disabled = isAnimating;
+  invBtn.onclick = () => { G.toggleInventory(state!); render(); };
+  header.appendChild(invBtn);
+
+  const menuBtn = document.createElement('button');
+  menuBtn.className = 'icon-btn';
+  menuBtn.textContent = '☰ Меню';
+  menuBtn.disabled = isAnimating;
+  menuBtn.onclick = () => { G.goToMenu(state!); render(); };
+  header.appendChild(menuBtn);
+
+  app.appendChild(header);
+
+  app.appendChild(row('Враг', state!.enemy.field));
+  app.appendChild(row('Ваше поле', state!.player.field));
+
+  const handRow = row('Рука', state!.player.hand, (c) => {
+    if (isAnimating) return;
+    if (G.placeCard(state!, c.instanceId)) render();
+  });
+  handRow.classList.add('hand');
+  app.appendChild(handRow);
+
+  const controls = document.createElement('div');
+  controls.className = 'controls';
+  if (state!.phase === 'placing') {
+    const btn = document.createElement('button');
+    btn.textContent = isAnimating ? '⚔️ Бой...' : '⚔️ В бой';
+    btn.disabled = state!.player.field.length === 0 || isAnimating;
+    btn.onclick = () => { animateBattle(); };
+    controls.appendChild(btn);
+  } else if (state!.phase === 'pack') {
+    const btn = document.createElement('button');
+    btn.className = 'pack';
+    btn.textContent = '🎁 Открыть пак';
+    btn.onclick = () => { G.openPack(state!); render(); };
+    controls.appendChild(btn);
+  }
+  app.appendChild(controls);
+
+  const log = document.createElement('div');
+  log.className = 'log';
+  state!.log.forEach(l => {
+    const line = document.createElement('div');
+    line.textContent = l;
+    log.appendChild(line);
+  });
+  app.appendChild(log);
+
+  if (state!.phase === 'spoils') renderSpoilsOverlay();
+  if (state!.showInventory)     renderInventoryOverlay();
+}
+
+function renderSpoilsOverlay() {
+  const overlay = document.createElement('div');
+  overlay.className = 'spoils-overlay';
+
+  const title = document.createElement('div');
+  title.className = 'spoils-title';
+  title.textContent = '🏆 Трофеи боя';
+  overlay.appendChild(title);
+
+  const hint = document.createElement('div');
+  hint.className = 'spoils-hint';
+  hint.textContent = 'Выберите одну карту, чтобы забрать её в коллекцию';
+  overlay.appendChild(hint);
+
+  const cards = document.createElement('div');
+  cards.className = 'spoils-cards';
+  state!.spoils.forEach(c => {
+    cards.appendChild(cardEl(c, {
+      onClick: () => {
+        G.takeSpoil(state!, c.instanceId);
+        render();
+      },
+    }));
+  });
+  overlay.appendChild(cards);
+
+  const skip = document.createElement('button');
+  skip.className = 'btn-secondary';
+  skip.textContent = 'Пропустить';
+  skip.onclick = () => { G.skipSpoils(state!); render(); };
+  overlay.appendChild(skip);
+
+  app.appendChild(overlay);
+}
+
+function renderInventoryOverlay() {
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) { G.toggleInventory(state!); render(); }
+  });
+
+  const panel = document.createElement('div');
+  panel.className = 'inventory-panel';
+
+  const header = document.createElement('div');
+  header.className = 'inventory-header';
+  const h2 = document.createElement('h2');
+  h2.textContent = '📦 Коллекция';
+  header.appendChild(h2);
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'btn-secondary';
+  closeBtn.textContent = '✕ Закрыть';
+  closeBtn.onclick = () => { G.toggleInventory(state!); render(); };
+  header.appendChild(closeBtn);
+  panel.appendChild(header);
+
+  panel.appendChild(inventoryContent());
+  overlay.appendChild(panel);
+  app.appendChild(overlay);
+}
 
 // ============================================================
 // Главный рендер
